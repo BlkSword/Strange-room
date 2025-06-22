@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>星际追击者</title>
+    <!-- 现代化字体 -->
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500&display=swap" rel="stylesheet">
+    <style>
+        html,
+        body {
+            margin: 0;
+            padding: 0;
+            background: #000;
+            overflow: hidden;
+        }
+
+        canvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+            background: #000;
+            border: none;
+        }
+
+        /* 增强状态栏 */
+        #status {
+            position: fixed;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 12px 24px;
+            background: linear-gradient(45deg, #00c6ff, #0072ff);
+            color: white;
+            border-radius: 8px;
+            font-size: 18px;
+            box-shadow: 0 0 10px rgba(0, 114, 255, 0.5);
+            animation: pulse 2s infinite;
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            z-index: 100;
+        }
+
+        @keyframes pulse {
+            0% {
+                transform: translateX(-50%) scale(1);
+            }
+
+            50% {
+                transform: translateX(-50%) scale(1.02);
+            }
+
+            100% {
+                transform: translateX(-50%) scale(1);
+            }
+        }
+
+        /* 控制面板 */
+        #controlPanel {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.5);
+            padding: 10px 20px;
+            border-radius: 10px;
+            font-family: 'Orbitron', sans-serif;
+            color: white;
+            display: flex;
+            gap: 15px;
+            font-size: 16px;
+            box-shadow: 0 0 10px #00ffcc66;
+            z-index: 100;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="status">正在连接服务器...</div>
+    <canvas id="gameCanvas"></canvas>
+    <!-- 控制面板 -->
+    <div id="controlPanel">
+        <div>🎮 控制：W/A/S/D 移动，空格射击</div>
+    </div>
+
+    <script src="https://cdn.socket.io/4.3.2/socket.io.min.js"></script>
+    <script>
+        // ==================== 游戏配置 ====================
+        const canvas = document.getElementById("gameCanvas");
+        const ctx = canvas.getContext("2d");
+
+        // 动态设置canvas尺寸
+        function resizeCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        resizeCanvas();
+        window.addEventListener('resize', resizeCanvas);
+
+        const PLAYER_SIZE = 30;   // 玩家方块大小
+        const BULLET_RADIUS = 7;  // 子弹圆球半径
+        const MONSTER_SIZE = 35;  // 怪物方块大小
+        let playerId = null;
+        let players = {};         // 所有玩家 { id: { x, y, color } }
+        let bullets = [];         // 所有子弹 { id, x, y, ownerId }
+        let monsters = [];        // 所有怪物 { id, x, y }
+        let explosions = [];      // 爆炸特效数组
+
+        // 单机模式标志和本地数据
+        let isOnline = false;
+        let offlinePlayer = {
+            id: "local",
+            x: 400,
+            y: 500,
+            color: "#00ff00"
+        };
+        let offlineBullets = [];
+        let offlineMonsters = [];
+
+        // ==================== WebSocket 连接 ====================
+        const socket = io("http://localhost:3000"); // 替换为你的服务器地址
+        const statusDiv = document.getElementById("status");
+
+        // 连接状态检测（3秒超时）
+        const connectTimeout = setTimeout(() => {
+            if (!socket.connected) {
+                statusDiv.textContent = "服务器未连接，已进入单机模式";
+                statusDiv.style.backgroundColor = "#ff4444";
+                isOnline = false;
+                initOfflineGame();
+            }
+        }, 3000);
+
+        // 连接成功回调
+        socket.on("connect", () => {
+            clearTimeout(connectTimeout);
+            isOnline = true;
+            statusDiv.textContent = "已连接服务器";
+            statusDiv.style.backgroundColor = "#44ff44";
+            // 重置本地数据
+            offlineBullets = [];
+            offlineMonsters = [];
+        });
+
+        // 连接断开回调
+        socket.on("disconnect", () => {
+            isOnline = false;
+            statusDiv.textContent = "服务器断开，已进入单机模式";
+            statusDiv.style.backgroundColor = "#ff4444";
+            initOfflineGame();
+        });
+
+        document.getElementById("connectionStatus").textContent = "在线";
+        document.getElementById("connectionStatus").style.color = "#44ff44";
+
+        socket.on("connect", () => {
+            document.getElementById("connectionStatus").textContent = "在线";
+            document.getElementById("connectionStatus").style.color = "#44ff44";
+        });
+
+        socket.on("disconnect", () => {
+            document.getElementById("connectionStatus").textContent = "单机模式";
+            document.getElementById("connectionStatus").style.color = "#ff4444";
+        });
+
+        // 接收玩家列表
+        socket.on("players", (data) => {
+            players = data;
+        });
+
+        // 接收子弹列表
+        socket.on("bullets", (data) => {
+            bullets = data;
+        });
+
+        // 接收怪物列表
+        socket.on("monsters", (data) => {
+            monsters = data;
+        });
+
+        // 接收新玩家加入
+        socket.on("playerJoined", (id) => {
+            if (!players[id]) {
+                players[id] = {
+                    x: Math.random() * (canvas.width - PLAYER_SIZE),
+                    y: Math.random() * (canvas.height - PLAYER_SIZE),
+                    color: getRandomColor()
+                };
+            }
+        });
+
+        // 接收玩家离开
+        socket.on("playerLeft", (id) => {
+            delete players[id];
+        });
+
+        // ==================== 输入控制 ====================
+        document.addEventListener("keydown", (e) => {
+            if (isOnline) {
+                // 在线模式控制
+                const speed = 5;
+                if (e.key === "w") movePlayer(0, -speed);
+                if (e.key === "s") movePlayer(0, speed);
+                if (e.key === "a") movePlayer(-speed, 0);
+                if (e.key === "d") movePlayer(speed, 0);
+                if (e.key === " ") shootBullet();
+            } else {
+                // 单机模式控制
+                handleOfflineInput(e);
+            }
+        });
+
+        function movePlayer(dx, dy) {
+            if (!playerId || !players[playerId]) return;
+            const player = players[playerId];
+            player.x = Math.max(0, Math.min(canvas.width - PLAYER_SIZE, player.x + dx));
+            player.y = Math.max(0, Math.min(canvas.height - PLAYER_SIZE, player.y + dy));
+            socket.emit("move", { x: player.x, y: player.y });
+        }
+
+        function shootBullet() {
+            const player = players[playerId];
+            const bullet = {
+                x: player.x + PLAYER_SIZE / 2,
+                y: player.y,
+                ownerId: playerId
+            };
+            socket.emit("shoot", bullet);
+        }
+
+        // 单机模式输入处理
+        function handleOfflineInput(e) {
+            const speed = 7;
+            if (e.key.toLowerCase() === "a") {
+                offlinePlayer.x = Math.max(0, offlinePlayer.x - speed);
+            }
+            if (e.key.toLowerCase() === "d") {
+                offlinePlayer.x = Math.min(canvas.width - PLAYER_SIZE, offlinePlayer.x + speed);
+            }
+            if (e.key.toLowerCase() === "w") {
+                offlinePlayer.y = Math.max(0, offlinePlayer.y - speed);
+            }
+            if (e.key.toLowerCase() === "s") {
+                offlinePlayer.y = Math.min(canvas.height - PLAYER_SIZE, offlinePlayer.y + speed);
+            }
+            if (e.key === " ") {
+                // 发射子弹（单机模式）
+                offlineBullets.push({
+                    x: offlinePlayer.x + PLAYER_SIZE / 2,
+                    y: offlinePlayer.y,
+                    dy: -7
+                });
+            }
+        }
+
+        // ==================== 渲染循环 ====================
+        function drawBackground() {
+            // 星空背景
+            const gradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+            gradient.addColorStop(0, '#0a002e');
+            gradient.addColorStop(1, '#000000');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // 星点
+            for (let i = 0; i < 150; i++) {
+                ctx.fillStyle = 'white';
+                ctx.beginPath();
+                ctx.arc(Math.random() * canvas.width, Math.random() * canvas.height, Math.random() * 2, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        function gameLoop() {
+            drawBackground(); // 绘制星空背景
+
+            // 绘制爆炸特效
+            ctx.save();
+            explosions.forEach(explosion => {
+                ctx.globalAlpha = explosion.alpha;
+                const gradient = ctx.createRadialGradient(
+                    explosion.x, explosion.y, 0,
+                    explosion.x, explosion.y, explosion.radius
+                );
+                gradient.addColorStop(0, '#ffff66');
+                gradient.addColorStop(1, '#ff003300');
+                ctx.fillStyle = gradient;
+                ctx.beginPath();
+                ctx.arc(explosion.x, explosion.y, explosion.radius, 0, Math.PI * 2);
+                ctx.fill();
+            });
+            ctx.restore();
+
+            if (isOnline) {
+                // 绘制在线模式数据
+                // 绘制怪物
+                ctx.save();
+                ctx.fillStyle = '#ff3366';
+                ctx.shadowColor = '#ff0033';
+                ctx.shadowBlur = 15;
+                monsters.forEach(monster => {
+                    ctx.fillRect(monster.x, monster.y, MONSTER_SIZE, MONSTER_SIZE);
+                });
+                ctx.restore();
+
+                // 绘制子弹
+                ctx.save();
+                ctx.fillStyle = '#ffcc00';
+                ctx.shadowColor = '#ffff66';
+                ctx.shadowBlur = 8;
+                bullets.forEach(bullet => {
+                    ctx.beginPath();
+                    ctx.arc(bullet.x, bullet.y, BULLET_RADIUS, 0, Math.PI * 2);
+                    ctx.fill();
+                });
+                ctx.restore();
+
+                // 绘制玩家
+                for (const id in players) {
+                    const p = players[id];
+                    ctx.save();
+                    const playerGradient = ctx.createLinearGradient(
+                        p.x, p.y,
+                        p.x + PLAYER_SIZE,
+                        p.y + PLAYER_SIZE
+                    );
+                    playerGradient.addColorStop(0, '#00ffcc');
+                    playerGradient.addColorStop(1, '#9933ff');
+                    ctx.fillStyle = playerGradient;
+                    ctx.shadowColor = '#9933ff';
+                    ctx.shadowBlur = 10;
+                    ctx.fillRect(p.x, p.y, PLAYER_SIZE, PLAYER_SIZE);
+                    ctx.restore();
+                }
+            } else {
+                // 绘制单机模式数据
+                // 绘制怪物
+                ctx.save();
+                ctx.fillStyle = '#ff3366';
+                ctx.shadowColor = '#ff0033';
+                ctx.shadowBlur = 15;
+                offlineMonsters.forEach(monster => {
+                    ctx.fillRect(monster.x, monster.y, MONSTER_SIZE, MONSTER_SIZE);
+                });
+                ctx.restore();
+
+                // 绘制子弹
+                ctx.save();
+                ctx.fillStyle = '#ffcc00';
+                ctx.shadowColor = '#ffff66';
+                ctx.shadowBlur = 8;
+                offlineBullets.forEach(bullet => {
+                    ctx.beginPath();
+                    ctx.arc(bullet.x, bullet.y, BULLET_RADIUS, 0, Math.PI * 2);
+                    ctx.fill();
+                });
+                ctx.restore();
+
+                // 绘制玩家
+                ctx.save();
+                const playerGradient = ctx.createLinearGradient(
+                    offlinePlayer.x, offlinePlayer.y,
+                    offlinePlayer.x + PLAYER_SIZE,
+                    offlinePlayer.y + PLAYER_SIZE
+                );
+                playerGradient.addColorStop(0, '#00ffcc');
+                playerGradient.addColorStop(1, '#9933ff');
+                ctx.fillStyle = playerGradient;
+                ctx.shadowColor = '#9933ff';
+                ctx.shadowBlur = 10;
+                ctx.fillRect(offlinePlayer.x, offlinePlayer.y, PLAYER_SIZE, PLAYER_SIZE);
+                ctx.restore();
+
+                updateOfflineGame();
+            }
+            requestAnimationFrame(gameLoop);
+        }
+        gameLoop();
+
+        // 单机模式本地数据初始化
+        function initOfflineGame() {
+            if (Object.keys(players).length === 0 || !players["local"]) {
+                // 初始化本地玩家
+                offlinePlayer = {
+                    id: "local",
+                    x: canvas.width / 2,
+                    y: canvas.height - 80,
+                    color: "#00ff00"
+                };
+                players = { [offlinePlayer.id]: offlinePlayer };
+            }
+            // 生成初始怪物
+            if (offlineMonsters.length === 0) {
+                for (let i = 0; i < 5; i++) {
+                    offlineMonsters.push({
+                        x: Math.random() * (canvas.width - MONSTER_SIZE),
+                        y: Math.random() * (canvas.height / 2),
+                        dx: (Math.random() > 0.5 ? 1 : -1) * 3
+                    });
+                }
+            }
+        }
+
+        // 单机模式更新逻辑
+        function updateOfflineGame() {
+            // 子弹移动
+            offlineBullets = offlineBullets.filter(bullet => {
+                bullet.y += bullet.dy;
+                return bullet.y > 0;
+            });
+
+            // 怪物移动（左右摆动）
+            offlineMonsters.forEach(monster => {
+                monster.x += monster.dx;
+                if (monster.x <= 0 || monster.x >= canvas.width - MONSTER_SIZE) {
+                    monster.dx *= -1;
+                }
+            });
+
+            // 碰撞检测与爆炸特效
+            offlineBullets.forEach((bullet, bIndex) => {
+                offlineMonsters.forEach((monster, mIndex) => {
+                    if (
+                        bullet.x > monster.x &&
+                        bullet.x < monster.x + MONSTER_SIZE &&
+                        bullet.y < monster.y + MONSTER_SIZE &&
+                        bullet.y > monster.y
+                    ) {
+                        // 创建爆炸效果
+                        explosions.push({
+                            x: monster.x + MONSTER_SIZE / 2,
+                            y: monster.y + MONSTER_SIZE / 2,
+                            radius: 0,
+                            maxRadius: 40,
+                            alpha: 1
+                        });
+
+                        offlineBullets.splice(bIndex, 1);
+                        offlineMonsters.splice(mIndex, 1);
+
+                        // 生成新怪物
+                        offlineMonsters.push({
+                            x: Math.random() * (canvas.width - MONSTER_SIZE),
+                            y: Math.random() * (canvas.height / 2),
+                            dx: (Math.random() > 0.5 ? 1 : -1) * 3
+                        });
+                    }
+                });
+            });
+
+            // 更新爆炸特效
+            explosions = explosions.filter(explosion => {
+                explosion.radius += 2;
+                explosion.alpha -= 0.05;
+                return explosion.radius < explosion.maxRadius && explosion.alpha > 0;
+            });
+        }
+
+        // 工具函数
+        function getRandomColor() {
+            const letters = '0123456789ABCDEF';
+            let color = '#';
+            for (let i = 0; i < 6; i++) color += letters[Math.floor(Math.random() * 16)];
+            return color;
+        }
+    </script>
+</body>
+
+</html>
