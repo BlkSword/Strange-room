@@ -2,8 +2,8 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { Button, notification } from "antd";
+import { MenuUnfoldOutlined } from '@ant-design/icons';
 import Peer from 'peerjs';
-
 export default function ChatRoom() {
     const [peerInstance, setPeerInstance] = useState<Peer | null>(null);
     const [myUniqueId, setMyUniqueId] = useState<string>("");
@@ -15,6 +15,27 @@ export default function ChatRoom() {
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef(null);
     const [api, contextHolder] = notification.useNotification();
+
+    // 新增状态管理
+    const [isMenuOpen, setIsMenuOpen] = useState(false);
+    const menuRef = useRef<HTMLDivElement>(null);
+
+    // 新增点击外部区域关闭菜单逻辑
+    useEffect(() => {
+        const handleClickOutside = (event: MouseEvent | TouchEvent) => {
+            if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
+                setIsMenuOpen(false);
+            }
+        };
+
+        document.addEventListener('mousedown', handleClickOutside);
+        document.addEventListener('touchstart', handleClickOutside);
+
+        return () => {
+            document.removeEventListener('mousedown', handleClickOutside);
+            document.removeEventListener('touchstart', handleClickOutside);
+        };
+    }, []);
 
     const openNotification = (type: 'success' | 'info' | 'warning' | 'error', message: string, description?: string) => {
         api[type]({
@@ -143,7 +164,10 @@ export default function ChatRoom() {
     return (
         <div className="flex h-screen bg-gray-900 text-white">
             {/* 用户列表 */}
-            <div className="w-64 bg-gray-800 p-4 hidden md:block">
+            <div
+                className={`fixed inset-y-0 left-0 z-50 w-64 bg-gray-800 p-4 transform ${isMenuOpen ? 'translate-x-0' : '-translate-x-full'} transition-transform duration-300 ease-in-out md:relative md:translate-x-0 md:flex md:flex-col md:h-full`}
+                ref={menuRef}
+            >
                 <h2 className="text-xl font-bold mb-4">我的ID</h2>
                 <p className="mb-4 text-sm text-gray-300">{myUniqueId}</p>
 
@@ -195,10 +219,11 @@ export default function ChatRoom() {
                         <h1 className="text-xl font-bold">群聊</h1>
                         <span className="text-sm text-gray-400">{connectedUsers.length + 1}人在线</span>
                     </div>
-                    <button className="md:hidden text-gray-400 hover:text-white">
-                        <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
-                        </svg>
+                    <button
+                        className="md:hidden text-gray-400 hover:text-white"
+                        onClick={() => setIsMenuOpen(!isMenuOpen)}
+                    >
+                        <MenuUnfoldOutlined className="w-6 h-6" />
                     </button>
                 </div>
 
