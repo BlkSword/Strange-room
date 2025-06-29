@@ -1,6 +1,12 @@
 # Strange room
 
-一个基于PeerJS的网页在线匿名聊天室
+一个基于 WebRTC 的 P2P 网页匿名聊天室
+
+# 技术栈
+
+前端：Nextjs+tailwindcss+Ant design
+
+后端：Nodejs+PeerJS
 
 # 用法
 

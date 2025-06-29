@@ -4,23 +4,27 @@ import { useState, useEffect, useRef } from 'react';
 import { Button, notification } from "antd";
 import { MenuUnfoldOutlined } from '@ant-design/icons';
 import Peer from 'peerjs';
+
 export default function ChatRoom() {
-    const [peerInstance, setPeerInstance] = useState<Peer | null>(null);
-    const [myUniqueId, setMyUniqueId] = useState<string>("");
-    const [idToConnect, setIdToConnect] = useState('');
-    const [connectedUsers, setConnectedUsers] = useState<{ id: string, conn: any }[]>([]);
-    const [messages, setMessages] = useState<Array<{ sender: string, content: string, timestamp: string }>>([]);
-    const [inputValue, setInputValue] = useState('');
-    const [activeUser] = useState('Me');
+    // 状态管理
+    const [peerInstance, setPeerInstance] = useState<Peer | null>(null); // Peer实例
+    const [myUniqueId, setMyUniqueId] = useState<string>(""); // 当前用户唯一ID
+    const [idToConnect, setIdToConnect] = useState(''); // 待连接的用户ID
+    const [connectedUsers, setConnectedUsers] = useState<{ id: string, conn: any }[]>([]); // 已连接用户列表
+    const [messages, setMessages] = useState<Array<{ sender: string, content: string, timestamp: string }>>([]); // 消息历史
+    const [inputValue, setInputValue] = useState(''); // 输入框内容
+    const [activeUser] = useState('Me'); // 当前活跃用户
+    // 消息容器引用
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef(null);
+    // 通知API和上下文
     const [api, contextHolder] = notification.useNotification();
 
-    // 新增状态管理
+    // 菜单状态管理
     const [isMenuOpen, setIsMenuOpen] = useState(false);
     const menuRef = useRef<HTMLDivElement>(null);
 
-    // 新增点击外部区域关闭菜单逻辑
+    // 外部点击检测关闭菜单
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent | TouchEvent) => {
             if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
@@ -37,6 +41,7 @@ export default function ChatRoom() {
         };
     }, []);
 
+
     const openNotification = (type: 'success' | 'info' | 'warning' | 'error', message: string, description?: string) => {
         api[type]({
             message,
@@ -45,20 +50,25 @@ export default function ChatRoom() {
         });
     };
 
+    // 组件挂载时生成随机用户ID
     useEffect(() => {
         const generateRandomString = () => Math.random().toString(36).substring(2);
         setMyUniqueId(generateRandomString());
     }, []);
 
+    // 初始化Peer实例
     useEffect(() => {
         if (myUniqueId) {
+            // 创建Peer实例并配置连接参数
             const peer = new Peer(myUniqueId, {
                 host: 'localhost',
                 port: 9000,
                 path: '/talk',
             });
 
+            // 监听连接事件
             peer.on('connection', (conn) => {
+                // 监听数据接收事件
                 conn.on('data', (data: any) => {
                     setMessages(prev => [...prev, {
                         sender: conn.peer,
@@ -67,6 +77,7 @@ export default function ChatRoom() {
                     }]);
                 });
 
+                // 连接建立成功
                 conn.on('open', () => {
                     setConnectedUsers(prev => [...prev, { id: conn.peer, conn }]);
                     setMessages(prev => [...prev, {
@@ -78,18 +89,21 @@ export default function ChatRoom() {
                 });
             });
 
+            // 监听错误事件
             peer.on('error', (err) => {
                 openNotification('error', '连接异常', err.message);
             });
 
             setPeerInstance(peer);
 
+            // 清理函数
             return () => {
                 peer.destroy();
             };
         }
     }, [myUniqueId]);
 
+    // 处理连接按钮点击事件
     const handleConnect = () => {
         if (!idToConnect.trim()) {
             openNotification('warning', '请输入有效ID', '连接ID不能为空');
@@ -106,9 +120,11 @@ export default function ChatRoom() {
             return;
         }
 
+        // 建立新连接
         const conn = peerInstance?.connect(idToConnect);
 
         if (conn) {
+            // 监听数据接收
             conn.on('data', (data: any) => {
                 setMessages(prev => [...prev, {
                     sender: conn.peer,
@@ -117,6 +133,7 @@ export default function ChatRoom() {
                 }]);
             });
 
+            // 连接成功回调
             conn.on('open', () => {
                 setConnectedUsers(prev => [...prev, { id: conn.peer, conn }]);
                 setMessages(prev => [...prev, {
@@ -129,6 +146,7 @@ export default function ChatRoom() {
         }
     };
 
+    // 发送消息处理函数
     const handleSendMessage = () => {
         if (inputValue.trim() === '') {
             openNotification('warning', '请输入消息内容');
@@ -144,6 +162,7 @@ export default function ChatRoom() {
 
         setMessages(prev => [...prev, newMessage]);
 
+        // 向所有连接的用户广播消息
         connectedUsers.forEach(({ conn }) => {
             conn.send({ text: inputValue });
         });
@@ -151,12 +170,14 @@ export default function ChatRoom() {
         setInputValue('');
     };
 
+    // 输入框回车事件处理
     const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
         if (e.key === 'Enter') {
             handleSendMessage();
         }
     };
 
+    // 消息滚动到底部效果
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages]);
