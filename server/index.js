@@ -25,6 +25,6 @@ const peerServer = ExpressPeerServer(server, {
 
 app.use("/talk", peerServer);
 
-server.listen(PORT, () => {
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`PeerJS server running on port ${PORT}`);
 });
