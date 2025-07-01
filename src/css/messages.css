@@ -1,0 +1,32 @@
+@keyframes slideIn {
+    from {
+        transform: translateX(var(--direction));
+        opacity: 0;
+    }
+
+    to {
+        transform: translateX(0);
+        opacity: 1;
+    }
+}
+
+.animate-slide {
+    --direction: calc(var(--sender) * 100%);
+    animation: slideIn 0.5s ease-out forwards;
+}
+
+[data-sender="true"] {
+    --sender: 1;
+}
+
+[data-sender="false"] {
+    --sender: -1;
+}
+
+.bg-gradient-blue {
+    background: linear-gradient(to right, #1853d3, #513bf6);
+}
+
+.bg-gradient-gray {
+    background: linear-gradient(to right, #616d7f, #374151);
+}

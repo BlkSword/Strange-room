@@ -10,6 +10,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Button, message, Space } from 'antd';
 import { MenuOutlined, CopyOutlined, SyncOutlined } from '@ant-design/icons';
 import Peer from 'peerjs';
+import "../css/messages.css"
 
 // 毛玻璃效果样式
 const GlassEffect = () => (
@@ -119,6 +120,12 @@ export default function ChatRoom() {
             };
         }
     }, [myUniqueId]);
+    // 刷新ID函数
+    const handleRefresh = () => {
+        const newId = Math.random().toString(36).substring(2);
+        setMyUniqueId(newId);
+        openMessage('success', 'ID已刷新');
+    };
 
     // 处理连接按钮点击事件
     const handleConnect = () => {
@@ -214,20 +221,29 @@ export default function ChatRoom() {
             <GlassEffect />
             {/* 用户列表 */}
             <div
-                className={`fixed inset-y-0 right-0 z-50 w-64 bg-gray-800 bg-opacity-50 backdrop-blur-lg p-4 transform ${isMenuOpen ? 'translate-x-0' : 'translate-x-full'} transition-transform duration-300 ease-in-out md:relative md:translate-x-0 md:flex md:flex-col md:h-full border-l border-white border-opacity-10`}
+                className={`fixed inset-y-0 right-0 z-50 w-64 bg-gray-800 bg-opacity-50 backdrop-blur-lg p-4 transform ${isMenuOpen ? 'translate-x-0' : 'translate-x-full'} transition-transform duration-300 ease-in-out md:relative md:translate-x-0 md:flex md:flex-col md:h-full border-l`}
                 ref={menuRef}
             >
                 <h2 className="text-xl font-bold mb-4">我的ID</h2>
                 <div className="border p-2 rounded-lg mb-4">
                     <div className="flex justify-between items-center">
                         <p className="text-sm text-gray-300">{myUniqueId}</p>
-                        <button
-                            onClick={handleCopy}
-                            className="ml-2 text-gray-400 hover:text-white transition-colors"
-                            aria-label="复制ID"
-                        >
-                            <CopyOutlined />
-                        </button>
+                        <div className="flex space-x-2">
+                            <button
+                                onClick={handleCopy}
+                                className="ml-2 text-gray-400 hover:text-white transition-colors"
+                                aria-label="复制ID"
+                            >
+                                <CopyOutlined />
+                            </button>
+                            <button
+                                onClick={handleRefresh}
+                                className="text-gray-400 hover:text-white transition-colors"
+                                aria-label="刷新ID"
+                            >
+                                <SyncOutlined />
+                            </button>
+                        </div>
                     </div>
                 </div>
                 {contextHolder}
@@ -288,11 +304,11 @@ export default function ChatRoom() {
                     {messages.map((message, index) => (
                         <div
                             key={index}
-                            className={`flex ${message.sender === activeUser ? 'justify-end' : 'justify-start'}`}
+                            className={`flex ${message.sender === activeUser ? 'justify-end' : 'justify-start'} animate-slide`}
                         >
                             <div className={`max-w-xs md:max-w-md rounded-lg p-3 ${message.sender === activeUser
-                                ? 'bg-blue-600 text-white rounded-br-none'
-                                : 'bg-gray-700 text-white rounded-bl-none'
+                                ? 'bg-gradient-blue text-white rounded-br-none'
+                                : 'bg-gradient-gray text-white rounded-bl-none'
                                 }`}>
                                 <div className="font-bold text-sm mb-1">{message.sender}</div>
                                 <div className="break-words">{message.content}</div>
