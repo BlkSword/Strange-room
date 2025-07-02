@@ -41,7 +41,8 @@
 
    ```bash
    cd ..
-   npm run dev
+   npm run build
+   npm start
    ```
 
 5. 打开浏览器访问 [http://localhost:3000](http://localhost:3000)
