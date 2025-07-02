@@ -30,3 +30,26 @@
 .bg-gradient-gray {
     background: linear-gradient(to right, #616d7f, #374151);
 }
+
+/* 消息气泡淡入动画 */
+@keyframes fadeInUp {
+    from {
+        opacity: 0;
+        transform: translateY(20px) scale(0.98);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}
+
+.animate-fadeInUp {
+    animation: fadeInUp 0.4s cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+/* 按钮点击缩放反馈 */
+.button-active:active {
+    transform: scale(0.96);
+    transition: transform 0.1s;
+}
