@@ -41,7 +41,8 @@
 
    ```bash
    cd ..
-   npm run dev
+   npm run build
+   npm start
    ```
 
 5. 打开浏览器访问 [http://localhost:3000](http://localhost:3000)
@@ -55,6 +56,6 @@
 
 ## 许可证
 
-本项目基于 MIT License 开源，详见 LICENSE 文件。
+本项目基于 Apache-2.0 开源，详见 LICENSE 文件。
 
 
