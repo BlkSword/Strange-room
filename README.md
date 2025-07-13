@@ -1,8 +1,8 @@
 
 <table>
 <tr>
-<td><img src="https://img.picui.cn/free/2025/07/03/686561024494b.png" alt="图片1" width="500"/></td>
-<td><img src="https://img.picui.cn/free/2025/07/03/68656101abd01.png" alt="图片2" width="500"/></td>
+<td><img src="https://free.picui.cn/free/2025/07/03/686561024494b.png" alt="图片1" width="500"/></td>
+<td><img src="https://free.picui.cn/free/2025/07/03/68656101abd01.png" alt="图片2" width="500"/></td>
 </tr>
 </table>
 
