@@ -1,3 +1,11 @@
+
+<table>
+<tr>
+<td><img src="https://free.picui.cn/free/2025/07/03/686561024494b.png" alt="图片1" width="500"/></td>
+<td><img src="https://free.picui.cn/free/2025/07/03/68656101abd01.png" alt="图片2" width="500"/></td>
+</tr>
+</table>
+
 # Strange room
 
 一个基于 WebRTC 的 P2P 网页匿名聊天室
@@ -7,7 +15,7 @@
 - 完全匿名：无需注册账号，点对点通信不留痕迹
 - 实时通信：基于 WebRTC，消息毫秒级送达
 - 简单易用：界面简洁，操作直观
-- 前后端分离：支持多人同时在线
+- 群聊机制：支持多人同时在线
 
 ## 技术栈
 
