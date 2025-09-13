@@ -444,6 +444,66 @@ export default function ChatRoom() {
         return () => document.removeEventListener('fullscreenchange', onFull);
     }, []);
 
+    // 处理页面可见性变化，解决切屏后连接问题
+    useEffect(() => {
+        const handleVisibilityChange = () => {
+            if (document.visibilityState === 'visible') {
+                // 页面变为可见时检查连接状态
+                connectedUsers.forEach(({ id, conn }) => {
+                    // 检查连接是否还有效
+                    if (conn.peerConnection && 
+                        (conn.peerConnection.connectionState === 'closed' || 
+                         conn.peerConnection.connectionState === 'failed' ||
+                         conn.peerConnection.connectionState === 'disconnected')) {
+                        // 如果连接已关闭，尝试重新连接
+                        const newConn = peerInstance?.connect(id);
+                        if (newConn) {
+                            newConn.on('data', (data: any) => {
+                                if (data.type === 'image' || data.type === 'video') {
+                                    setMessages(prev => [...prev, {
+                                        sender: newConn.peer,
+                                        content: data.data,
+                                        timestamp: new Date().toLocaleTimeString(),
+                                        type: data.type as 'image' | 'video'
+                                    }]);
+                                } else {
+                                    setMessages(prev => [...prev, {
+                                        sender: newConn.peer,
+                                        content: data.text,
+                                        timestamp: new Date().toLocaleTimeString(),
+                                        type: 'text' as const
+                                    }]);
+                                }
+                            });
+
+                            newConn.on('open', () => {
+                                setConnectedUsers(prev => prev.map(user => 
+                                    user.id === id ? { ...user, conn: newConn } : user
+                                ));
+                                setMessages(prev => [...prev, {
+                                    sender: 'System',
+                                    content: `与用户 ${id} 的连接已恢复`,
+                                    timestamp: new Date().toLocaleTimeString(),
+                                    type: 'text' as const
+                                }]);
+                                openMessage('success', `与用户 ${id} 的连接已恢复`);
+                            });
+                            
+                            newConn.on('error', (err) => {
+                                openMessage('error', `重新连接用户 ${id} 失败: ${err.message}`);
+                            });
+                        }
+                    }
+                });
+            }
+        };
+
+        document.addEventListener('visibilitychange', handleVisibilityChange);
+        return () => {
+            document.removeEventListener('visibilitychange', handleVisibilityChange);
+        };
+    }, [connectedUsers, peerInstance, openMessage]);
+
     return (
         <div className="relative flex h-screen bg-gray-900 text-white overflow-hidden">
             {/* 毛玻璃背景 */}
