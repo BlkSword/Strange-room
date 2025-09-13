@@ -113,9 +113,10 @@ export default function ChatRoom() {
     useEffect(() => {
         if (myUniqueId) {
             const peer = new Peer(myUniqueId, {
-                host: 'localhost',
+                host: 'talk.blksword.com',
                 port: 9000,
                 path: '/talk',
+                secure: true,
             });
 
             // 监听连接事件
