@@ -20,7 +20,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self';"
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline'; connect-src 'self' https://talk.blksword.com:* wss://talk.blksword.com:*; img-src 'self' data: https:; style-src 'self' 'unsafe-inline';"
     }
   },
   "bundle": {
