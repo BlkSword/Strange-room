@@ -80,7 +80,7 @@ export default function ChatRoom() {
     }, []);
 
     // 通知函数
-    const openMessage = (type: 'success' | 'error' | 'warning', content: string) => {
+    const openMessage = (type: 'success' | 'error' | 'warning' | 'info', content: string) => {
         messageApi.open({
             type,
             content,
@@ -186,8 +186,16 @@ export default function ChatRoom() {
             return;
         }
 
+        // 显示连接中通知
+        openMessage('info', '正在建立连接...');
+
         const conn = peerInstance?.connect(idToConnect);
         if (conn) {
+            // 设置连接超时处理
+            const connectionTimeout = setTimeout(() => {
+                openMessage('error', '连接超时，请稍后重试');
+            }, 10000); // 10秒超时
+
             conn.on('data', (data: any) => {
                 if (data.type === 'image' || data.type === 'video') {
                     setMessages(prev => [...prev, {
@@ -207,6 +215,7 @@ export default function ChatRoom() {
             });
 
             conn.on('open', () => {
+                clearTimeout(connectionTimeout); // 清除超时定时器
                 setConnectedUsers(prev => [...prev, { id: conn.peer, conn }]);
                 setMessages(prev => [...prev, {
                     sender: 'System',
@@ -215,6 +224,11 @@ export default function ChatRoom() {
                     type: 'text' as const
                 }]);
                 openMessage('success', `已连接到用户 ${conn.peer}`);
+            });
+
+            conn.on('error', (err) => {
+                clearTimeout(connectionTimeout); // 清除超时定时器
+                openMessage('error', `连接失败: ${err.message}`);
             });
         }
     };
