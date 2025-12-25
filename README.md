@@ -1,69 +1,164 @@
+# Strange Room
 
-<table>
-<tr>
-<td><img src="https://free.picui.cn/free/2025/07/03/686561024494b.png" alt="图片1" width="500"/></td>
-<td><img src="https://free.picui.cn/free/2025/07/03/68656101abd01.png" alt="图片2" width="500"/></td>
-</tr>
-</table>
+一个基于 WebRTC 的端到端加密临时协作空间，支持白板、代码编辑和实时聊天。
 
-# Strange room
+## 项目简介
 
-一个基于 WebRTC 的 P2P 网页匿名聊天室
+Strange Room 是一个专为临时协作设计的 Web 应用。它采用点对点（P2P）通信架构，所有数据直接在用户设备之间传输，服务器仅负责信令交换，不存储任何业务数据。房间具有自动销毁机制，在设定的有效期结束后永久删除所有数据。
 
-## 特性亮点
+## 核心特性
 
-- 完全匿名：无需注册账号，点对点通信不留痕迹
-- 实时通信：基于 WebRTC，消息毫秒级送达
-- 简单易用：界面简洁，操作直观
-- 群聊机制：支持多人同时在线
+### 安全与隐私
+- 端到端加密：所有通信通过 WebRTC 直接在用户设备间传输
+- 零数据存储：服务器仅处理信令交换，不保存任何聊天内容、白板数据或代码
+- 自动销毁：支持 1/6/24/48 小时有效期，到期后房间数据自动清除
+- 匿名使用：无需注册登录，不收集个人信息
 
-## 技术栈
+### 协作功能
+- 实时白板：多人同时绘图，支持画笔、形状、橡皮擦
+- 代码协同：内置 Monaco 编辑器，支持多种编程语言语法高亮
+- 实时聊天：群组聊天，支持文本消息
+- 光标追踪：实时显示其他用户的鼠标位置
 
-前端：Next.js + Tailwind CSS + Ant Design  
-后端：Node.js + PeerJS
+### 技术优势
+- P2P 架构：数据不经过中转服务器
+- 低延迟：基于 WebRTC 的实时通信
+- 离线可用：核心功能在浏览器本地运行
+- 跨平台：支持桌面和移动端浏览器
+
+## 技术架构
+
+### 前端技术栈
+- **框架**: Next.js 15 (App Router)
+- **UI 组件**: Ant Design 5
+- **样式**: Tailwind CSS
+- **协同编辑**: Yjs + y-webrtc
+- **代码编辑**: Monaco Editor
+- **状态管理**: React Hooks
+
+### 后端技术栈
+- **信令服务器**: Node.js + WebSocket
+- **P2P 通信**: WebRTC + PeerJS
+- **数据同步**: Yjs 协同引擎
+
+### 项目结构
+```
+Strange-room/
+├── src/
+│   ├── app/                 # Next.js 页面路由
+│   │   ├── page.tsx        # 主页
+│   │   ├── room/[id]/      # 房间页面
+│   │   └── join/[id]/      # 加入房间页面
+│   ├── components/         # React 组件
+│   │   ├── Room/          # 房间相关组件
+│   │   ├── Chat/          # 聊天组件
+│   │   ├── Editor/        # 代码编辑器
+│   │   └── Whiteboard/    # 白板组件
+│   ├── hooks/             # 自定义 Hooks
+│   ├── lib/               # 工具库
+│   │   ├── room/         # 房间管理
+│   │   ├── yjs/          # Yjs 协同引擎
+│   │   └── utils/        # 工具函数
+│   └── types/             # TypeScript 类型定义
+├── server/                # 信令服务器
+└── public/                # 静态资源
+```
 
 ## 快速开始
 
+### 环境要求
+- Node.js >= 18.0.0
+- npm >= 9.0.0
+
+### 安装步骤
+
 1. 克隆项目
+```bash
+git clone https://github.com/BlkSword/Strange-room.git
+cd Strange-room
+```
 
-   ```bash
-   git clone https://github.com/BlkSword/Strange-room.git
-   cd Strange-room
-   ```
+2. 安装前端依赖
+```bash
+npm install
+```
 
-2. 安装依赖
+3. 安装服务器依赖
+```bash
+cd server
+npm install
+cd ..
+```
 
-   ```bash
-   npm install
-   cd server && npm install
-   ```
+4. 启动信令服务器
+```bash
+cd server
+node signaling-server.js
+```
 
-3. 启动后端服务
+5. 启动前端开发服务器
+```bash
+npm run dev
+```
 
-   ```bash
-   cd server
-   node index.js
-   ```
+6. 访问应用
 
-4. 启动前端项目
+打开浏览器访问 [http://localhost:3000](http://localhost:3000)
 
-   ```bash
-   cd ..
-   npm run build
-   npm start
-   ```
+### 生产部署
 
-5. 打开浏览器访问 [http://localhost:3000](http://localhost:3000)
+1. 构建前端
+```bash
+npm run build
+```
 
-## 使用方法
+2. 启动生产服务器
+```bash
+npm start
+```
 
-1. 打开聊天室页面后，系统会自动分配一个唯一的 ID。
-2. 将你的 ID 发送给好友，或输入对方的 ID 进行连接。
-3. 连接成功后即可实时点对点聊天。
-4. 所有通信均为端到端加密，不会被服务器记录。
+## 使用指南
+
+### 创建房间
+1. 访问主页，点击"创建房间"按钮
+2. 输入房间名称（可选）和你的昵称
+3. 选择房间有效期（1/6/24/48 小时）
+4. 确认创建，系统生成邀请链接
+
+### 加入房间
+1. 通过创建者分享的邀请链接访问
+2. 输入你的昵称
+3. 点击"加入"按钮进入协作空间
+
+### 房间功能
+- **白板**：点击画笔工具开始绘图，支持多人同时编辑
+- **代码编辑**：在编辑器中编写代码，支持语法高亮和自动补全
+- **聊天**：在聊天框输入消息，与房间成员实时交流
+- **用户列表**：查看当前在线的所有用户
+
+### 销毁房间
+- 房间创建者可以随时手动销毁房间
+- 所有数据将被永久删除，无法恢复
+- 有效期结束后房间自动销毁
+
+## 安全说明
+
+### 数据传输
+- 所有通信通过 WebRTC 端到端加密
+- 数据直接在用户浏览器之间传输
+- 信令服务器仅交换连接信息，无法窥探通信内容
+
+### 数据存储
+- 房间数据存储在浏览器 IndexedDB 中
+- 本地加密存储，其他应用无法访问
+- 房间销毁后本地数据同步清除
+
+### 隐私保护
+- 无需注册账号，不收集个人信息
+- 不使用 Cookie 或追踪技术
+- 不连接第三方统计服务
+
 
 ## 许可证
 
-本项目基于 Apache-2.0 开源，详见 LICENSE 文件。
-
-
+本项目基于 Apache-2.0 开源，详见 [LICENSE](LICENSE) 文件。

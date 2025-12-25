@@ -1,17 +1,24 @@
 {
-  "name": "server",
-  "version": "1.0.0",
-  "main": "index.js",
+  "name": "strange-room-signaling-server",
+  "version": "3.0.0",
+  "description": "Strange Room 信令服务器 - WebRTC 信令和房间管理",
+  "main": "signaling-server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node signaling-server.js",
+    "dev": "node signaling-server.js"
   },
-  "author": "",
-  "license": "ISC",
-  "description": "",
+  "keywords": [
+    "webrtc",
+    "signaling",
+    "p2p",
+    "websocket"
+  ],
+  "author": "BlkSword",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "dependencies": {
-    "dotenv": "^16.5.0",
-    "express": "^5.1.0",
-    "http": "^0.0.1-security",
-    "peer": "^1.0.2"
+    "ws": "^8.18.0"
   }
 }

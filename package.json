@@ -1,21 +1,43 @@
 {
-  "name": "Strange-room",
+  "name": "strange-room",
   "version": "1.0.0",
+  "description": "A secure P2P chat application built with Electron and Next.js",
+  "main": "electron/main.js",
   "private": true,
+  "author": "BlkSword",
+  "license": "MIT",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "server": "node server/signaling-server.js",
+    "dev:all": "concurrently \"npm run server\" \"npm run dev\"",
+    "electron:dev": "concurrently \"npm run dev:all\" \"wait-on http://localhost:3000 && electron .\"",
+    "electron:build": "npm run build && electron-builder",
+    "electron:build:win": "npm run build && electron-builder --win",
+    "electron:build:mac": "npm run build && electron-builder --mac",
+    "electron:build:linux": "npm run build && electron-builder --linux",
+    "postinstall": "electron-builder install-app-deps"
   },
   "dependencies": {
     "@ant-design/icons": "^5.6.1",
+    "@monaco-editor/react": "^4.7.0",
     "antd": "^5.26.2",
+    "express": "^4.22.1",
+    "idb": "^8.0.3",
+    "lucide-react": "^0.562.0",
+    "nanoid": "^5.1.6",
     "next": "15.3.4",
     "peerjs": "^1.5.5",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
-    "@tauri-apps/api": "^2.0.0"
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "ws": "^8.18.3",
+    "y-indexeddb": "^9.0.12",
+    "y-monaco": "^0.1.6",
+    "y-protocols": "^1.0.7",
+    "y-webrtc": "^10.3.0",
+    "yjs": "^13.6.28"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3",
@@ -23,9 +45,73 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "concurrently": "^9.1.2",
+    "electron": "^35.0.0",
+    "electron-builder": "^25.1.8",
+    "electron-is-dev": "^3.0.1",
     "eslint": "^9",
     "eslint-config-next": "15.3.4",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "com.blksword.strange-room",
+    "productName": "Strange Room",
+    "directories": {
+      "buildResources": "build",
+      "output": "dist"
+    },
+    "files": [
+      "electron/**/*",
+      "out/**/*",
+      "node_modules/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico",
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "icon": "build/icon.icns",
+      "category": "public.app-category.social-networking",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb",
+        "rpm"
+      ],
+      "icon": "build/icon.png",
+      "category": "Network"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
   }
 }

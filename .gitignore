@@ -19,6 +19,13 @@
 
 # production
 /build
+/dist
+
+# electron
+*.log
+
+# tauri
+/src-tauri/target
 
 # misc
 .DS_Store
@@ -39,3 +46,9 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+
+#other
+ARCHITECTURE.md
+.npmrc
+.claude
