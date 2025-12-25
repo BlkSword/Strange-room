@@ -15,12 +15,14 @@ export interface UseYjsOptions extends Partial<YjsConfig> {
   peerId?: string; // 从外部传入的 peer ID（基于昵称生成）
   onSynced?: (isSynced: boolean) => void;
   token?: string; // 访问令牌
+  encryptionEnabled?: boolean; // 是否启用端到端加密
 }
 
 export function useYjs(options: UseYjsOptions = {}) {
   const [isConnected, setIsConnected] = useState(false);
   const [onlineUsers, setOnlineUsers] = useState<AwarenessState[]>([]);
   const [chatMessages, setChatMessages] = useState<any[]>([]);
+  const [decryptedMessages, setDecryptedMessages] = useState<any[]>([]);
 
   const yjsRef = useRef<YjsManager | null>(null);
   // 使用外部传入的 peerId，如果没有则使用临时 ID
@@ -58,6 +60,7 @@ export function useYjs(options: UseYjsOptions = {}) {
         userColor: options.userColor || USER_COLORS[Math.floor(Math.random() * USER_COLORS.length)],
         token: options.token,
         signalingServers: options.signalingServers,
+        encryptionKey: options.encryptionKey,
       };
 
       const yjs = new YjsManager(config);
@@ -65,45 +68,71 @@ export function useYjs(options: UseYjsOptions = {}) {
 
       // 监听连接状态
       if (yjs.provider) {
-        yjs.provider.on('synced', ({ synced }: { synced: boolean }) => {
-          setIsConnected(synced);
-          options.onSynced?.(synced);
+        yjs.provider.on('sync', (event: any) => {
+          console.log('[useYjs] 同步状态:', event);
+          setIsConnected(true);
+        });
+
+        yjs.provider.on('status', (event: { status: string }) => {
+          setIsConnected(event.status === 'connected');
         });
       }
 
       // 监听聊天消息变化
-      yjs.onChatChange((messages) => {
+      yjs.onChatChange(async (messages) => {
         setChatMessages(messages);
+
+        // 如果启用了加密，解密消息
+        if (options.encryptionEnabled && yjs.hasEncryption()) {
+          const decrypted = await yjs.decryptChatMessages(messages);
+          setDecryptedMessages(decrypted);
+        } else {
+          setDecryptedMessages(messages);
+        }
       });
 
-      // 更新在线用户列表
+      // 更新在线用户列表 - 监听 awareness 变化
       const updateUsers = () => {
         const users = yjs.getOnlineUsers();
         console.log('[useYjs] 更新在线用户列表:', users.length, '个用户');
         setOnlineUsers(users);
       };
 
+      // 初始更新
       updateUsers();
 
-      // 定期更新用户列表
-      const interval = setInterval(updateUsers, 1000);
+      // 监听 awareness 变化，实时更新用户列表
+      const handleAwarenessChange = () => {
+        updateUsers();
+      };
+
+      if (yjs.awareness) {
+        yjs.awareness.on('change', handleAwarenessChange);
+      }
 
       return () => {
-        clearInterval(interval);
+        if (yjs.awareness) {
+          yjs.awareness.off('change', handleAwarenessChange);
+        }
         yjs.destroy();
       };
     } catch (error) {
       console.error('[useYjs] 初始化错误:', error);
     }
-  }, [options.roomId, options.token]);
+  }, [options.roomId, options.token, options.encryptionKey]);
 
   // 发送聊天消息
   const sendMessage = useCallback((content: string, type: 'text' | 'image' | 'file' | 'system' = 'text') => {
     const yjs = yjsRef.current;
     if (!yjs) return null;
 
+    // 如果启用了加密，发送加密消息
+    if (options.encryptionEnabled && yjs.hasEncryption()) {
+      return yjs.sendEncryptedChatMessage(content, type);
+    }
+
     return yjs.sendChatMessage(content, type);
-  }, []);
+  }, [options.encryptionEnabled]);
 
   // 获取聊天消息
   const getMessages = useCallback(() => {
@@ -199,11 +228,46 @@ export function useYjs(options: UseYjsOptions = {}) {
     yjs.updateUserInfo(userName, userColor);
   }, []);
 
+  // ========== 加密相关方法 ==========
+
+  // 初始化加密（生成新密钥）
+  const initEncryption = useCallback(async (): Promise<string | null> => {
+    const yjs = yjsRef.current;
+    if (!yjs) return null;
+    try {
+      return await yjs.initEncryption();
+    } catch (error) {
+      console.error('[useYjs] 初始化加密失败:', error);
+      return null;
+    }
+  }, []);
+
+  // 初始化加密（导入已有密钥）
+  const importEncryptionKey = useCallback(async (keyString: string): Promise<boolean> => {
+    const yjs = yjsRef.current;
+    if (!yjs) return false;
+    try {
+      await yjs.initEncryption(keyString);
+      return true;
+    } catch (error) {
+      console.error('[useYjs] 导入加密密钥失败:', error);
+      return false;
+    }
+  }, []);
+
+  // 检查是否已启用加密
+  const hasEncryption = useCallback((): boolean => {
+    const yjs = yjsRef.current;
+    if (!yjs) return false;
+    return yjs.hasEncryption();
+  }, []);
+
   return {
     // State
     isConnected,
     onlineUsers,
     chatMessages,
+    decryptedMessages, // 解密后的消息
     peerId: peerIdRef.current,
 
     // Yjs 实例
@@ -222,5 +286,10 @@ export function useYjs(options: UseYjsOptions = {}) {
     getRoomInfo,
     clearAllData,
     destroy,
+
+    // Encryption Actions
+    initEncryption,
+    importEncryptionKey,
+    hasEncryption,
   };
 }

@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
-import { Button, Modal, Input, Radio, Card, Space, message } from "antd";
+import { Button, Modal, Input, Radio, Card, Space, message, Switch } from "antd";
 import {
   Rocket,
   CheckCircle,
@@ -30,6 +30,7 @@ export default function Home() {
   const [nickname, setNickname] = useState('');
   const [ttl, setTtl] = useState<RoomTTL>(24);
   const [isCreating, setIsCreating] = useState(false);
+  const [encryptionEnabled, setEncryptionEnabled] = useState(true);
 
   // 创建房间
   const handleCreateRoom = async () => {
@@ -83,6 +84,11 @@ export default function Home() {
       localStorage.setItem(`room-data-${roomId}`, JSON.stringify(roomData));
       localStorage.setItem(`user-nickname-${roomId}`, nickname);
       localStorage.setItem(`room-token-${roomId}`, token);
+
+      // 如果启用了加密，生成加密密钥
+      if (encryptionEnabled) {
+        localStorage.setItem(`room-encryption-enabled-${roomId}`, 'true');
+      }
 
       message.success('房间创建成功！');
 
@@ -554,6 +560,27 @@ export default function Home() {
               <Clock size={14} />
               有效期结束后，房间将自动销毁，所有数据将被永久删除
             </p>
+          </div>
+
+          <div>
+            <div className="flex items-center justify-between mb-3">
+              <label className="text-sm font-medium text-gray-700">端到端加密</label>
+              <Switch
+                checked={encryptionEnabled}
+                onChange={setEncryptionEnabled}
+                checkedChildren="开启"
+                unCheckedChildren="关闭"
+              />
+            </div>
+            {encryptionEnabled && (
+              <div className="flex items-start gap-2 p-3 bg-green-50 rounded-lg border border-green-200">
+                <Lock size={16} className="text-green-600 flex-shrink-0 mt-0.5" />
+                <div className="text-xs text-green-700">
+                  <p className="font-medium mb-1">端到端加密已启用</p>
+                  <p>消息内容使用 AES-GCM 256位加密，只有房间成员可以解密查看。服务器无法窥探内容。</p>
+                </div>
+              </div>
+            )}
           </div>
         </Space>
       </Modal>

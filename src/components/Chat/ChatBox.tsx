@@ -5,7 +5,7 @@
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
-import { Send, Smile, Image as ImageIcon } from 'lucide-react';
+import { Send, Smile, Image as ImageIcon, Lock } from 'lucide-react';
 import { Button, Input, Avatar } from 'antd';
 import { RoomMessage } from '@/types/room';
 
@@ -14,9 +14,10 @@ interface ChatBoxProps {
   currentUserId: string;
   onSendMessage: (content: string, type: 'text' | 'image') => void;
   onlineUsers?: any[]; // Yjs awareness users
+  encryptionEnabled?: boolean;
 }
 
-export function ChatBox({ messages, currentUserId, onSendMessage, onlineUsers = [] }: ChatBoxProps) {
+export function ChatBox({ messages, currentUserId, onSendMessage, onlineUsers = [], encryptionEnabled = false }: ChatBoxProps) {
   const [input, setInput] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -121,9 +122,14 @@ export function ChatBox({ messages, currentUserId, onSendMessage, onlineUsers = 
                           : 'bg-gray-100 text-gray-900 rounded-bl-md'
                       }`}
                     >
-                      <p className="text-sm whitespace-pre-wrap break-words leading-relaxed">
-                        {msg.content}
-                      </p>
+                      <div className="flex items-start gap-2">
+                        <p className="text-sm whitespace-pre-wrap break-words leading-relaxed flex-1">
+                          {msg.content}
+                        </p>
+                        {encryptionEnabled && msg.type !== 'system' && (
+                          <Lock size={10} className={isCurrentUser ? 'text-blue-200' : 'text-gray-400'} />
+                        )}
+                      </div>
                     </div>
                     <span className="text-xs text-gray-400 mt-1 px-1">{formatTime(msg.timestamp)}</span>
                   </div>

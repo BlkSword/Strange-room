@@ -81,6 +81,18 @@ export class RoomManager {
   }
 
   /**
+   * 设置房间创建时间（用于从服务器或 Yjs 同步时间）
+   * 当加入已有房间时，使用此方法校正倒计时
+   */
+  setCreatedAt(createdAt: number, ttl: RoomTTL) {
+    if (!this.room) return;
+
+    this.room.createdAt = createdAt;
+    this.room.expiresAt = createdAt + ttl * 60 * 60 * 1000;
+    console.log('[Room] 校正房间创建时间:', new Date(createdAt).toISOString(), '过期时间:', new Date(this.room.expiresAt).toISOString());
+  }
+
+  /**
    * 离开房间
    */
   leaveRoom(peerId: string) {

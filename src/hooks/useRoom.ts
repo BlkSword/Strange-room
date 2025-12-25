@@ -201,6 +201,12 @@ export function useRoom(options?: UseRoomOptions) {
     destroyRoom,
     kickPeer,
     updateCursor,
+    setCreatedAt: (createdAt: number, ttl: RoomTTL) => {
+      const manager = roomManagerRef.current;
+      if (!manager) return;
+      manager.setCreatedAt(createdAt, ttl);
+      setRemainingTime(manager.getRemainingTime());
+    },
 
     // Computed
     formatRemainingTime,

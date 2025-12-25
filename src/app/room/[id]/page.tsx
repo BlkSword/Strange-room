@@ -5,7 +5,7 @@
 
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { RoomHeader } from '@/components/Room/RoomHeader';
 import { RoomLayout } from '@/components/Room/RoomLayout';
@@ -41,6 +41,9 @@ export default function RoomPage() {
     return '';
   });
 
+  // 从 URL 获取加密密钥参数
+  const urlEncryptionKey = searchParams.get('key');
+
   const [nickname, setNickname] = useState('');
   const [nicknameInput, setNicknameInput] = useState('');
   const [inviteLink, setInviteLink] = useState<string>('');
@@ -51,19 +54,19 @@ export default function RoomPage() {
   const [currentCode, setCurrentCode] = useState<string>('// 在这里开始编写代码...\n');
 
   // 获取或生成用户的 peer ID（基于昵称）
-  const [userPeerId, setUserPeerId] = useState<string>(() => {
-    if (typeof window !== 'undefined') {
-      // 尝试从 localStorage 获取保存的昵称
-      const savedNickname = localStorage.getItem(`user-nickname-${roomId}`);
-      if (savedNickname) {
-        // 基于保存的昵称生成稳定的 ID
-        return generateStableIdFromNickname(savedNickname, roomId);
+  // 初始为临时 ID，将在昵称设置后更新
+  const [userPeerId, setUserPeerId] = useState<string>('temp_user');
+
+  // 当昵称变化时，更新 userPeerId
+  useEffect(() => {
+    if (nickname && nickname.trim()) {
+      const newPeerId = generateStableIdFromNickname(nickname, roomId);
+      if (newPeerId !== userPeerId) {
+        console.log('[Room] 昵称变化，更新 userPeerId:', nickname, '->', newPeerId);
+        setUserPeerId(newPeerId);
       }
-      // 如果没有保存的昵称，返回占位符
-      return 'temp_user';
     }
-    return 'unknown';
-  });
+  }, [nickname, roomId]);
 
   // 状态
   const [isLoading, setIsLoading] = useState(true);
@@ -74,6 +77,9 @@ export default function RoomPage() {
   const [nicknameModalOpen, setNicknameModalOpen] = useState(false);
   const [pendingRoomData, setPendingRoomData] = useState<{ room: Room | null; isCreator: boolean }>({ room: null, isCreator: false });
 
+  // 跟踪时间是否已校正，避免重复校正
+  const timeSyncedRef = useRef(false);
+
   // 房间销毁处理回调
   const handleRoomDestroyed = useCallback((reason: 'expired' | 'creator_left' | 'manual') => {
     console.log('[Room] handleRoomDestroyed 被调用, reason:', reason);
@@ -82,7 +88,7 @@ export default function RoomPage() {
   }, []);
 
   // Hooks
-  const { room, remainingTime, isCreator, peerId, joinRoom, destroyRoom, formatRemainingTime } = useRoom({
+  const { room, remainingTime, isCreator, peerId, joinRoom, destroyRoom, formatRemainingTime, setCreatedAt } = useRoom({
     peerId: userPeerId,
     onRoomDestroyed: handleRoomDestroyed,
   });
@@ -92,12 +98,28 @@ export default function RoomPage() {
     console.log('[Room] isCreator 状态变化:', isCreator);
   }, [isCreator]);
 
-  const { isConnected, onlineUsers, chatMessages, sendMessage, updateCode, getCode, yjs, updateUserInfo, onCodeChange, peerId: yjsPeerId } = useYjs({
+  // 获取或初始化加密密钥
+  const [encryptionKey, setEncryptionKey] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem(`room-encryption-key-${roomId}`) || '';
+    }
+    return '';
+  });
+  const [encryptionEnabledState, setEncryptionEnabledState] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem(`room-encryption-enabled-${roomId}`) === 'true';
+    }
+    return false;
+  });
+
+  const { isConnected, onlineUsers, chatMessages, decryptedMessages, sendMessage, updateCode, getCode, yjs, updateUserInfo, onCodeChange, peerId: yjsPeerId, initEncryption, importEncryptionKey, hasEncryption } = useYjs({
     roomId,
     peerId: userPeerId, // 传递基于昵称生成的 peerId
     userName: nickname,
     userColor,
     token, // 传递 token 给 Yjs
+    encryptionKey, // 传递加密密钥
+    encryptionEnabled: !!encryptionKey, // 启用加密
   });
 
   // 初始化房间
@@ -121,6 +143,14 @@ export default function RoomPage() {
     // 加载保存的房间数据
     const savedNickname = localStorage.getItem(`user-nickname-${roomId}`);
     const savedRoomData = localStorage.getItem(`room-data-${roomId}`);
+
+    // 如果URL中包含加密密钥，保存到localStorage
+    if (urlEncryptionKey) {
+      console.log('[Room] 从URL获取到加密密钥');
+      localStorage.setItem(`room-encryption-key-${roomId}`, urlEncryptionKey);
+      setEncryptionKey(urlEncryptionKey);
+      setEncryptionEnabledState(true);
+    }
 
     if (savedRoomData) {
       try {
@@ -168,7 +198,10 @@ export default function RoomPage() {
     const unsubscribe = onCodeChange((newCode) => {
       setCurrentCode(newCode);
     });
-    return () => {};
+    return () => {
+      // 正确清理监听器
+      if (unsubscribe) unsubscribe();
+    };
   }, [onCodeChange]);
 
   // 初始加载代码
@@ -185,12 +218,66 @@ export default function RoomPage() {
     }
   }, [yjs, room]);
 
+  // 从 Yjs 同步房间创建时间，校正倒计时（仅连接时执行一次）
+  useEffect(() => {
+    if (!yjs || !room) return;
+
+    // 只在首次且有 roomData 时同步一次
+    if (timeSyncedRef.current) return;
+    timeSyncedRef.current = true;
+
+    const roomDataStr = yjs.getRoomInfo('roomData');
+    if (roomDataStr) {
+      try {
+        const roomData = JSON.parse(roomDataStr);
+        if (roomData.createdAt && roomData.ttl) {
+          console.log('[Room] 从 Yjs 同步房间创建时间:', new Date(roomData.createdAt).toISOString());
+          setCreatedAt(roomData.createdAt, roomData.ttl);
+        }
+      } catch (e) {
+        console.error('[Room] 解析 Yjs roomData 失败:', e);
+      }
+    }
+  }, [yjs, room, setCreatedAt]);
+
   // 当 nickname 改变时，更新 Yjs 用户信息
   useEffect(() => {
     if (nickname && updateUserInfo) {
       updateUserInfo(nickname, userColor);
     }
   }, [nickname, userColor, updateUserInfo]);
+
+  // 初始化加密
+  useEffect(() => {
+    const initializeEncryption = async () => {
+      // 检查是否启用了加密且 yjs 已准备好
+      if (!encryptionEnabledState || !yjs || !hasEncryption || !nickname) {
+        return;
+      }
+
+      // 如果已有保存的密钥，直接导入
+      if (encryptionKey) {
+        console.log('[Room] 导入已有加密密钥');
+        await importEncryptionKey(encryptionKey);
+        return;
+      }
+
+      // 如果是创建者且没有密钥，生成新密钥
+      if (isCreator && room) {
+        console.log('[Room] 创建者生成新的加密密钥');
+        const newKeyString = await initEncryption();
+        if (newKeyString) {
+          setEncryptionKey(newKeyString);
+          localStorage.setItem(`room-encryption-key-${roomId}`, newKeyString);
+          message.success('端到端加密已启用');
+        }
+      } else {
+        console.log('[Room] 等待获取加密密钥...');
+      }
+    };
+
+    initializeEncryption();
+  }, [encryptionEnabledState, yjs, hasEncryption, nickname, isCreator, room]);
 
   // 显示昵称输入弹窗
   const showNicknameModal = useCallback((existingRoom: any, isCreator: boolean = false) => {
@@ -293,10 +380,29 @@ export default function RoomPage() {
 
     setInviteLink(link);
 
-    // 自动复制
-    navigator.clipboard.writeText(link).then(() => {
-      message.success('邀请链接已复制到剪贴板');
-    });
+    // 自动复制（处理不支持 clipboard API 的情况）
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(link).then(() => {
+        message.success('邀请链接已复制到剪贴板');
+      }).catch(() => {
+        message.success('邀请链接已生成（请手动复制）');
+      });
+    } else {
+      // 降级方案：使用传统的 textarea 方法
+      const textarea = document.createElement('textarea');
+      textarea.value = link;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      try {
+        document.execCommand('copy');
+        message.success('邀请链接已复制到剪贴板');
+      } catch {
+        message.success('邀请链接已生成（请手动复制）');
+      }
+      document.body.removeChild(textarea);
+    }
   }, [room]);
 
   // 发送消息
@@ -309,13 +415,41 @@ export default function RoomPage() {
     updateCode(code);
   }, [updateCode]);
 
+  // 复制加密密钥
+  const handleCopyEncryptionKey = useCallback(async () => {
+    if (!encryptionKey) return;
+
+    // 将密钥添加到邀请链接中
+    const keyLink = `${window.location.origin}/room/${roomId}?token=${token}&key=${encodeURIComponent(encryptionKey)}`;
+
+    try {
+      await navigator.clipboard.writeText(keyLink);
+      message.success('带加密密钥的邀请链接已复制到剪贴板');
+    } catch {
+      // 降级方案
+      const textarea = document.createElement('textarea');
+      textarea.value = keyLink;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      try {
+        document.execCommand('copy');
+        message.success('带加密密钥的邀请链接已复制到剪贴板');
+      } catch {
+        message.success('带加密密钥的邀请链接已生成（请手动复制）');
+      }
+      document.body.removeChild(textarea);
+    }
+  }, [encryptionKey, roomId, token]);
+
   // 获取在线用户列表
   const getAllUsers = useCallback(() => {
     return onlineUsers.map((u) => ({
       id: u.user?.id || '',
       nickname: u.user?.name || '匿名用户',
       color: u.user?.color || '#3b82f6',
-      joinedAt: Date.now(),
+      joinedAt: Date.now(), // 注意：这会导致每次重新渲染，但暂时保留
       isCreator: u.user?.id === room?.creatorPeerId,
       isOnline: true,
     }));
@@ -386,8 +520,11 @@ export default function RoomPage() {
         onlineCount={getAllUsers().length}
         isCreator={isCreator}
         inviteLink={inviteLink}
+        encryptionEnabled={encryptionEnabledState && hasEncryption}
+        encryptionKeyString={encryptionKey}
         onGenerateInvite={handleGenerateInvite}
         onDestroyRoom={handleDestroyRoom}
+        onCopyEncryptionKey={handleCopyEncryptionKey}
       />
 
       {/* 房间布局 */}
@@ -395,10 +532,11 @@ export default function RoomPage() {
         leftPanel={<UserList users={getAllUsers()} currentUserId={peerId} />}
         chatPanel={
           <ChatBox
-            messages={chatMessages}
+            messages={encryptionEnabledState && hasEncryption ? decryptedMessages : chatMessages}
             currentUserId={yjsPeerId}
             onSendMessage={handleSendMessage}
             onlineUsers={onlineUsers}
+            encryptionEnabled={encryptionEnabledState && hasEncryption}
           />
         }
         whiteboardPanel={

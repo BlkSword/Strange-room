@@ -3,10 +3,11 @@
  */
 
 import * as Y from 'yjs';
-import { WebrtcProvider } from 'y-webrtc';
+import { WebsocketProvider } from 'y-websocket';
 import { IndexeddbPersistence } from 'y-indexeddb';
 import { Y_STORE_KEYS, AwarenessState } from '@/types/yjs';
 import { nanoid } from 'nanoid';
+import { RoomKeyManager } from '@/lib/crypto/e2e-crypto';
 
 export interface YjsConfig {
   roomId: string;
@@ -15,27 +16,32 @@ export interface YjsConfig {
   userColor: string;
   token?: string; // 访问令牌
   signalingServers?: string[];
+  encryptionKey?: string; // 房间加密密钥（可选，用于加入已有房间）
 }
 
 export class YjsManager {
   public doc: Y.Doc;
-  public provider: WebrtcProvider | null = null;
+  public provider: WebsocketProvider | null = null;
   public idbPersistence: IndexeddbPersistence | null = null;
   public awareness: any;
   public roomInfoMap: Y.Map<any>;
+  public shouldReconnect: boolean = true; // 控制是否应该重连
 
   private config: YjsConfig;
   private destroyCallbacks: Set<() => void> = new Set();
+  private keyManager: RoomKeyManager;
+  private encryptionEnabled: boolean = false;
+  private reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
 
   // 数据片段
   public chatArray: Y.Array<any>;
   public canvasFragment: Y.XmlFragment;
   public codeText: Y.Text;
   public filesMap: Y.Map<any>;
-  public roomInfoMap: Y.Map<any>;
 
   constructor(config: YjsConfig) {
     this.config = config;
+    this.keyManager = new RoomKeyManager();
 
     // 创建 Yjs 文档
     this.doc = new Y.Doc();
@@ -46,6 +52,11 @@ export class YjsManager {
     this.codeText = this.doc.getText(Y_STORE_KEYS.CODE);
     this.filesMap = this.doc.getMap(Y_STORE_KEYS.FILES);
     this.roomInfoMap = this.doc.getMap(Y_STORE_KEYS.ROOM_INFO);
+
+    // 初始化加密（如果提供了密钥）
+    if (config.encryptionKey) {
+      this.initEncryption(config.encryptionKey);
+    }
 
     // 初始化 IndexedDB 持久化
     this.initPersistence();
@@ -73,39 +84,81 @@ export class YjsManager {
   }
 
   /**
-   * 初始化 WebRTC 提供者
+   * 根据 HTTP origin 构建 WebSocket URL
+   * http://192.168.1.100:3000 -> ws://192.168.1.100:9001
+   * https://example.com -> wss://example.com:9001
+   */
+  private buildWebSocketUrl(origin: string): string {
+    try {
+      const url = new URL(origin);
+      const protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+      // 默认信令服务器端口为 9001
+      return `${protocol}//${url.hostname}:9001`;
+    } catch {
+      return 'ws://localhost:9001';
+    }
+  }
+
+  /**
+   * 初始化 WebSocket 提供者（使用 y-websocket）
    */
   private initProvider() {
-    // 构建 WebSocket URL（带 roomId 和 token 参数）
-    const baseUrl = this.config.signalingServers?.[0] || 'ws://localhost:9001';
-    const wsUrl = `${baseUrl}/signaling?roomId=${encodeURIComponent(this.config.roomId)}&token=${encodeURIComponent(this.config.token || '')}`;
+    // 动态构建 WebSocket URL：根据当前页面地址自动适配
+    const origin = typeof window !== 'undefined' ? window.location.origin : '';
+    const baseUrl = this.config.signalingServers?.[0] || this.buildWebSocketUrl(origin);
+    // y-websocket 会自动在 URL 后面添加 /roomId
+    const wsUrl = `${baseUrl}/yjs`;
 
     console.log('[Yjs] WebSocket URL:', wsUrl);
+    console.log('[Yjs] 当前页面 origin:', origin);
 
-    this.provider = new WebrtcProvider(
-      this.config.roomId,
-      this.doc,
-      {
-        signaling: [wsUrl],
-        maxConns: 20,
-        filterBcConns: true,
-        peerOpts: {},
-        // 启用本地网络发现
-        rtcConfig: {
-          iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' },
-          ]
+    try {
+      this.provider = new WebsocketProvider(
+        wsUrl,
+        this.config.roomId,
+        this.doc,
+        {
+          connect: true,
+          // 通过 params 传递 token
+          params: {
+            token: this.config.token || '',
+          },
         }
-      }
-    );
+      );
+      console.log('[Yjs] WebsocketProvider 创建成功');
+    } catch (error) {
+      console.error('[Yjs] WebsocketProvider 创建失败:', error);
+      throw error;
+    }
+
+    // 暴露到全局用于调试
+    if (typeof window !== 'undefined') {
+      (window as any).__yjsProvider__ = this.provider;
+      console.log('[Yjs] Provider 已暴露到 window.__yjsProvider__');
+    }
 
     this.awareness = this.provider.awareness;
 
+    console.log('[Yjs] ========== WebSocket 配置 ==========');
     console.log('[Yjs] 房间 ID:', this.config.roomId);
     console.log('[Yjs] 用户 ID:', this.config.userId);
     console.log('[Yjs] WebSocket URL:', wsUrl);
     console.log('[Yjs] Token:', this.config.token?.substring(0, 8) + '...');
+    console.log('[Yjs] =====================================');
+
+    // 监听 WebSocket 连接状态
+    this.provider.on('status', (event: { status: string }) => {
+      console.log('[Yjs] WebSocket 状态:', event.status);
+      // status: 'connecting' | 'connected' | 'disconnected'
+    });
+
+    this.provider.on('connection-error', (error: any) => {
+      console.error('[Yjs] WebSocket 连接错误:', error);
+    });
+
+    this.provider.on('sync', (event: { syncStep: number }) => {
+      console.log('[Yjs] 同步进度:', event.syncStep);
+    });
 
     // 设置当前用户状态
     this.setAwarenessState({
@@ -126,23 +179,28 @@ export class YjsManager {
       this.onAwarenessChange(states);
     });
 
-    // 监听连接状态
-    this.provider.on('synced', ({ synced }: { synced: boolean }) => {
-      console.log('[Yjs] 同步状态:', synced);
+    // 监听 WebSocket 连接变化
+    this.provider.ws?.addEventListener('open', () => {
+      console.log('[Yjs] WebSocket 连接已建立');
     });
 
-    // 监听 WebRTC 连接变化
-    this.provider.on('connection-error', (error: any) => {
-      console.error('[Yjs] WebRTC 连接错误:', error);
+    this.provider.ws?.addEventListener('close', (event: CloseEvent) => {
+      console.log('[Yjs] WebSocket 连接已关闭, code:', event.code, 'reason:', event.reason);
+
+      // 如果服务器明确表示房间不存在（1008 状态码），停止重连
+      if (event.code === 1008 && event.reason === 'room_not_found') {
+        console.warn('[Yjs] 房间不存在，停止重连');
+        this.shouldReconnect = false;
+        // 停止 WebsocketProvider 的自动重连
+        if (this.provider) {
+          this.provider.destroy();
+          this.provider = null;
+        }
+      }
     });
 
-    this.provider.on('peers', (event: any) => {
-      console.log('[Yjs] 对等节点变化:', {
-        removed: event.removed,
-        added: event.added,
-        peers: event.peers,
-        webrtcPeers: this.provider?.webrtcPeers?.size || 0
-      });
+    this.provider.ws?.addEventListener('error', (error) => {
+      console.error('[Yjs] WebSocket 错误:', error);
     });
   }
 
@@ -243,20 +301,32 @@ export class YjsManager {
 
   /**
    * 监听聊天变化
+   * @returns 取消订阅函数
    */
-  onChatChange(callback: (messages: any[]) => void) {
-    this.chatArray.observe(() => {
+  onChatChange(callback: (messages: any[]) => void): () => void {
+    const handler = () => {
       callback(this.chatArray.toArray());
-    });
+    };
+    this.chatArray.observe(handler);
+    // 返回取消订阅函数
+    return () => {
+      this.chatArray.unobserve(handler);
+    };
   }
 
   /**
    * 监听代码变化
+   * @returns 取消订阅函数
    */
-  onCodeChange(callback: (text: string) => void) {
-    this.codeText.observe(() => {
+  onCodeChange(callback: (text: string) => void): () => void {
+    const handler = () => {
       callback(this.codeText.toString());
-    });
+    };
+    this.codeText.observe(handler);
+    // 返回取消订阅函数
+    return () => {
+      this.codeText.unobserve(handler);
+    };
   }
 
   /**
@@ -329,7 +399,7 @@ export class YjsManager {
       this.idbPersistence.destroy();
     }
 
-    // 断开 WebRTC 连接
+    // 断开 WebSocket 连接
     if (this.provider) {
       this.provider.destroy();
     }
@@ -338,6 +408,125 @@ export class YjsManager {
     this.doc.destroy();
 
     console.log('[Yjs] 实例已销毁');
+  }
+
+  // ========== 端到端加密相关方法 ==========
+
+  /**
+   * 初始化加密 - 生成新密钥
+   */
+  async initEncryption(): Promise<string> {
+    const result = await this.keyManager.createRoom();
+    this.encryptionEnabled = true;
+    console.log('[Yjs] E2E 加密已启用，密钥 ID:', result.keyId);
+    return result.keyString;
+  }
+
+  /**
+   * 初始化加密 - 导入已有密钥
+   */
+  async initEncryption(keyString: string): Promise<void> {
+    await this.keyManager.joinRoom(keyString);
+    this.encryptionEnabled = true;
+    console.log('[Yjs] E2E 加密已启用（导入密钥）');
+  }
+
+  /**
+   * 检查是否已启用加密
+   */
+  hasEncryption(): boolean {
+    return this.encryptionEnabled && this.keyManager.hasKey();
+  }
+
+  /**
+   * 发送加密聊天消息
+   */
+  async sendEncryptedChatMessage(content: string, type: 'text' | 'image' | 'file' | 'system' = 'text') {
+    if (!this.encryptionEnabled) {
+      console.warn('[Yjs] 加密未启用，发送未加密消息');
+      return this.sendChatMessage(content, type);
+    }
+
+    // 获取当前 awareness 中的用户信息
+    const currentState = this.awareness?.getLocalState() as AwarenessState;
+    const senderName = currentState?.user?.name || this.config.userName;
+
+    // 加密消息内容
+    const encryptedResult = await this.keyManager.encryptMessage({
+      content,
+      type,
+      senderId: this.config.userId,
+      senderName,
+    });
+
+    // 创建包含加密数据的消息
+    const message = {
+      id: nanoid(),
+      type: 'encrypted', // 标记为加密消息
+      encrypted: encryptedResult.encrypted,
+      keyId: encryptedResult.keyId,
+      senderId: this.config.userId,
+      senderName: senderName,
+      timestamp: Date.now(),
+    };
+
+    this.doc.transact(() => {
+      this.chatArray.push([message]);
+    });
+
+    return message;
+  }
+
+  /**
+   * 解密聊天消息
+   */
+  async decryptChatMessage(message: any): Promise<any> {
+    // 如果不是加密消息，直接返回
+    if (message.type !== 'encrypted') {
+      return message;
+    }
+
+    if (!this.encryptionEnabled) {
+      console.warn('[Yjs] 加密未启用，无法解密消息');
+      return {
+        ...message,
+        content: '[加密消息 - 无法解密]',
+        type: 'system',
+      };
+    }
+
+    try {
+      const decrypted = await this.keyManager.decryptMessage(message.encrypted);
+      if (decrypted) {
+        return {
+          id: message.id,
+          ...decrypted,
+          senderId: message.senderId,
+          senderName: message.senderName,
+          timestamp: message.timestamp,
+        };
+      }
+      return {
+        ...message,
+        content: '[解密失败]',
+        type: 'system',
+      };
+    } catch (error) {
+      console.error('[Yjs] 解密消息失败:', error);
+      return {
+        ...message,
+        content: '[解密失败]',
+        type: 'system',
+      };
+    }
+  }
+
+  /**
+   * 批量解密聊天消息
+   */
+  async decryptChatMessages(messages: any[]): Promise<any[]> {
+    const decryptedPromises = messages.map(msg => this.decryptChatMessage(msg));
+    return await Promise.all(decryptedPromises);
   }
 
   /**

@@ -40,7 +40,6 @@ export function Canvas({ roomId, userId, userName, yjs }: WhiteboardProps) {
   // 当前绘制的路径
   const currentPathRef = useRef<[number, number][]>([]);
   const startPosRef = useRef<{ x: number; y: number } | null>(null);
-  const observerRef = useRef<any>(null);
 
   // 从 Yjs 加载白板数据
   useEffect(() => {
@@ -67,36 +66,53 @@ export function Canvas({ roomId, userId, userName, yjs }: WhiteboardProps) {
 
     loadCanvasData();
 
-    // 直接监听 roomInfoMap 的变化
-    if (yjs.roomInfoMap) {
-      console.log('[Canvas] 设置 roomInfoMap 监听器');
-      observerRef.current = yjs.roomInfoMap.observe((event: any) => {
-        console.log('[Canvas] roomInfoMap 变化:', event);
-        // 检查是否是 canvasOperations key 变化了
-        event.keysChanged.forEach((key: string) => {
-          if (key === 'canvasOperations') {
-            console.log('[Canvas] canvasOperations 变化，重新加载');
-            loadCanvasData();
-          }
-        });
-      });
-    }
+    // 使用 doc.on('update', ...) 监听所有 Yjs 事务
+    // 然后检查 canvasOperations 是否变化
+    const handleUpdate = () => {
+      const canvasData = yjs.getRoomInfo('canvasOperations');
+      if (canvasData) {
+        try {
+          const ops = typeof canvasData === 'string' ? JSON.parse(canvasData) : canvasData;
+          console.log('[Canvas] Yjs update 事件，重新加载白板数据');
+          setOperations(ops || []);
+        } catch (e) {
+          console.error('[Canvas] 解析 canvasData 失败:', e);
+        }
+      }
+    };
+
+    // 监听 Yjs 文档的更新事件
+    yjs.doc.on('update', handleUpdate);
 
     return () => {
-      if (observerRef.current) {
-        console.log('[Canvas] 清理 observer');
-        observerRef.current.destroy();
-        observerRef.current = null;
-      }
+      // 清理监听器
+      yjs.doc.off('update', handleUpdate);
+      console.log('[Canvas] 清理 Yjs update 监听器');
     };
   }, [yjs]);
 
-  // 同步操作到 Yjs
+  // 同步操作到 Yjs（使用节流优化，避免频繁同步）
   const syncToYjs = useCallback((newOperations: DrawOperation[]) => {
     if (!yjs) return;
     console.log('[Canvas] 同步到 Yjs:', newOperations.length, '个操作');
     yjs.setRoomInfo('canvasOperations', JSON.stringify(newOperations));
   }, [yjs]);
+
+  // 节流版本的同步函数
+  const throttledSyncRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const throttledSyncToYjs = useCallback((newOperations: DrawOperation[]) => {
+    // 清除之前的定时器
+    if (throttledSyncRef.current) {
+      clearTimeout(throttledSyncRef.current);
+    }
+
+    // 设置新的定时器（100ms 后执行）
+    throttledSyncRef.current = setTimeout(() => {
+      syncToYjs(newOperations);
+      throttledSyncRef.current = null;
+    }, 100);
+  }, [syncToYjs]);
 
   // 初始化画布
   useEffect(() => {
@@ -113,8 +129,14 @@ export function Canvas({ roomId, userId, userName, yjs }: WhiteboardProps) {
     resizeCanvas();
     window.addEventListener('resize', resizeCanvas);
 
-    return () => window.removeEventListener('resize', resizeCanvas);
-  }, []);
+    return () => {
+      window.removeEventListener('resize', resizeCanvas);
+      // 清理节流定时器
+      if (throttledSyncRef.current) {
+        clearTimeout(throttledSyncRef.current);
+      }
+    };
+  }, [throttledSyncRef]);
 
   // 重绘画布 - 使用 ref 获取最新的 operations
   const redrawCanvas = useCallback(() => {
@@ -272,19 +294,22 @@ export function Canvas({ roomId, userId, userName, yjs }: WhiteboardProps) {
 
       setOperations((prev) => {
         const newOps = [...prev, newOp];
-        syncToYjs(newOps);
+        // 使用节流同步，避免频繁网络传输
+        throttledSyncToYjs(newOps);
         return newOps;
       });
     }
 
     currentPathRef.current = [];
     startPosRef.current = null;
-  }, [isDrawing, currentTool, color, lineWidth, syncToYjs]);
+  }, [isDrawing, currentTool, color, lineWidth, throttledSyncToYjs]);
 
   // 清空画布
   const handleClear = () => {
-    setOperations([]);
-    syncToYjs([]);
+    const newOps: DrawOperation[] = [];
+    setOperations(newOps);
+    // 清空操作立即同步，不使用节流
+    syncToYjs(newOps);
     const canvas = canvasRef.current;
     if (!canvas) return;
 

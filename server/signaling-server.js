@@ -329,7 +329,135 @@ const server = http.createServer((req, res) => {
 
 // ========== WebSocket 服务器（用于 WebRTC 信令） ==========
 
-const wss = new WebSocket.Server({ server, path: '/signaling' });
+const wss = new WebSocket.Server({ noServer: true });
+
+// ========== WebSocket 服务器（用于 y-websocket 协议） ==========
+
+// y-websocket 存储结构
+const yjsRooms = new Map(); // roomId -> Set<WebSocket>
+const yjsClients = new Map(); // ws -> { roomId, token }
+
+function getYjsRoomClients(roomId) {
+  if (!yjsRooms.has(roomId)) {
+    yjsRooms.set(roomId, new Set());
+  }
+  return yjsRooms.get(roomId);
+}
+
+const yjsWss = new WebSocket.Server({ noServer: true });
+
+// 处理 HTTP 升级请求，区分 y-websocket 和其他 WebSocket
+server.on('upgrade', (req, socket, head) => {
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const pathname = url.pathname;
+
+  console.log(`[Server] Upgrade request: pathname=${pathname}`);
+
+  // y-websocket 使用 /yjs/roomId 格式
+  if (pathname.startsWith('/yjs')) {
+    console.log(`[Server] Routing to yjs WebSocket server`);
+    yjsWss.handleUpgrade(req, socket, head, (ws) => {
+      yjsWss.emit('connection', ws, req);
+    });
+  } else if (pathname === '/signaling') {
+    console.log(`[Server] Routing to signaling WebSocket server`);
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      wss.emit('connection', ws, req);
+    });
+  } else {
+    console.log(`[Server] Unknown WebSocket path: ${pathname}`);
+    socket.destroy();
+  }
+});
+
+yjsWss.on('connection', (ws, req) => {
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  // y-websocket 会在路径后添加 /roomId，例如 /yjs/GGRFBNYN
+  const pathname = url.pathname;
+  const roomId = pathname.startsWith('/yjs/') ? pathname.split('/').pop() : url.searchParams.get('room');
+  const token = url.searchParams.get('token');
+  const clientIP = getClientIP(req);
+
+  console.log(`[Yjs-WS] 连接请求: pathname=${pathname}, roomId=${roomId}, ip=${clientIP}`);
+
+  // 验证房间
+  if (!roomId) {
+    securityLog('YJS_WS_REJECTED', { reason: 'missing_roomId', ip: clientIP });
+    console.log('[Yjs-WS] 拒绝连接: 缺少房间ID');
+    ws.close(1008, 'Missing roomId');
+    return;
+  }
+
+  // 检查房间是否存在
+  const room = rooms.get(roomId);
+  if (!room) {
+    securityLog('YJS_WS_REJECTED', { reason: 'room_not_found', roomId, ip: clientIP });
+    console.log(`[Yjs-WS] 拒绝连接: 房间不存在 ${roomId}`);
+    ws.close(1008, 'room_not_found');
+    return;
+  }
+
+  // 验证令牌
+  const tokenValidation = validateToken(token);
+  if (!tokenValidation.valid || tokenValidation.roomId !== roomId) {
+    securityLog('YJS_WS_REJECTED', {
+      reason: 'invalid_token',
+      roomId,
+      error: tokenValidation.error,
+      ip: clientIP
+    });
+    console.log(`[Yjs-WS] 拒绝连接: 无效令牌 - ${tokenValidation.error || 'Room mismatch'}`);
+    ws.close(1008, 'Invalid token');
+    return;
+  }
+
+  // 添加到房间
+  const clients = getYjsRoomClients(roomId);
+  clients.add(ws);
+  yjsClients.set(ws, { roomId, token });
+
+  console.log(`[Yjs-WS] 连接成功: roomId=${roomId}, 当前连接数: ${clients.size}`);
+
+  // 监听消息（y-websocket 协议 - 使用二进制消息）
+  ws.on('message', (data) => {
+    const clientInfo = yjsClients.get(ws);
+
+    if (!clientInfo) {
+      ws.close(1008, 'Client not registered');
+      return;
+    }
+
+    // y-websocket 使用二进制协议，直接转发给其他客户端
+    const clients = getYjsRoomClients(clientInfo.roomId);
+    let forwardedCount = 0;
+
+    clients.forEach((client) => {
+      if (client !== ws && client.readyState === WebSocket.OPEN) {
+        client.send(data);  // 转发原始二进制数据
+        forwardedCount++;
+      }
+    });
+
+    if (forwardedCount > 0) {
+      console.log(`[Yjs-WS] 转发消息给 ${forwardedCount} 个客户端，消息长度: ${data.length}`);
+    }
+  });
+
+  // 连接关闭
+  ws.on('close', () => {
+    const clientInfo = yjsClients.get(ws);
+    if (clientInfo) {
+      const clients = getYjsRoomClients(clientInfo.roomId);
+      clients.delete(ws);
+      yjsClients.delete(ws);
+      console.log(`[Yjs-WS] 连接关闭: roomId=${clientInfo.roomId}, 剩余连接数: ${clients.size}`);
+    }
+  });
+
+  ws.on('error', (error) => {
+    console.error(`[Yjs-WS] WebSocket 错误:`, error.message);
+  });
+});
 
 wss.on('connection', (ws, req) => {
   const url = new URL(req.url, `ws://${req.headers.host}`);
@@ -390,14 +518,29 @@ wss.on('connection', (ws, req) => {
 
   // 监听消息（y-webrtc 协议：简单转发）
   ws.on('message', (data) => {
+    // 调试日志：记录收到的消息
+    try {
+      const message = JSON.parse(data.toString());
+      console.log(`[Server] 收到 JSON 消息: roomId=${roomId}, type=${message.type || 'unknown'}`);
+      console.log(`[Server] 消息内容:`, JSON.stringify(message).substring(0, 200));
+    } catch {
+      // 二进制消息（y-webrtc 使用二进制协议）
+      console.log(`[Server] 收到二进制消息: roomId=${roomId}, 长度=${data.length}, 前10字节=${Array.from(data.slice(0, 10)).map(b => b.toString(16).padStart(2, '0')).join(' ')}`);
+    }
+
     // 转发给房间内其他客户端
+    // 重要：将 Buffer 转换为字符串，确保浏览器端收到的是 JSON 而不是 Blob
+    const messageStr = data.toString();
     const clients = roomClients.get(roomId);
     if (clients) {
+      let forwardedCount = 0;
       clients.forEach((client) => {
         if (client !== ws && client.readyState === WebSocket.OPEN) {
-          client.send(data);
+          client.send(messageStr);  // 发送字符串而不是 Buffer
+          forwardedCount++;
         }
       });
+      console.log(`[Server] 转发消息给 ${forwardedCount} 个客户端`);
     }
   });
 
@@ -424,9 +567,10 @@ server.listen(PORT, () => {
   console.log('║              Strange Room Signaling Server v3.0            ║');
   console.log('║                                                            ║');
   console.log(`║  HTTP API: http://localhost:${PORT}                        ║`);
-  console.log(`║  WebSocket: ws://localhost:${PORT}/signaling               ║`);
+  console.log(`║  WebRTC Signaling: ws://localhost:${PORT}/signaling        ║`);
+  console.log(`║  Yjs WebSocket: ws://localhost:${PORT}/yjs                 ║`);
   console.log('║                                                            ║');
-  console.log('║  功能: 房间管理 | 自包含令牌 | WebRTC 信令                 ║');
+  console.log('║  功能: 房间管理 | 自包含令牌 | WebRTC + Yjs 信令          ║');
   console.log('║                                                            ║');
   console.log('╚════════════════════════════════════════════════════════════╝');
   console.log('');

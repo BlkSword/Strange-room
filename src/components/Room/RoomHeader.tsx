@@ -5,7 +5,7 @@
 'use client';
 
 import { RoomTTL } from '@/types/room';
-import { Clock, Users, Share2, Copy, Check, Crown, Shield, Trash2 } from 'lucide-react';
+import { Clock, Users, Share2, Copy, Check, Crown, Shield, Trash2, Lock } from 'lucide-react';
 import { useState } from 'react';
 import { Button, Badge, Tooltip, Modal } from 'antd';
 
@@ -17,8 +17,11 @@ interface RoomHeaderProps {
   onlineCount: number;
   isCreator: boolean;
   inviteLink?: string;
+  encryptionEnabled?: boolean;
+  encryptionKeyString?: string;
   onGenerateInvite?: () => void;
   onDestroyRoom?: () => void;
+  onCopyEncryptionKey?: () => void;
 }
 
 export function RoomHeader({
@@ -29,8 +32,11 @@ export function RoomHeader({
   onlineCount,
   isCreator,
   inviteLink,
+  encryptionEnabled = false,
+  encryptionKeyString,
   onGenerateInvite,
   onDestroyRoom,
+  onCopyEncryptionKey,
 }: RoomHeaderProps) {
   const [copied, setCopied] = useState(false);
   const [destroyModalOpen, setDestroyModalOpen] = useState(false);
@@ -118,6 +124,14 @@ export function RoomHeader({
                   <Users size={14} />
                   {onlineCount} 人在线
                 </span>
+                {encryptionEnabled && (
+                  <Tooltip title="端到端加密已启用，消息内容只有房间成员可以查看">
+                    <span className="flex items-center gap-1.5 text-green-600 bg-green-50 px-2 py-0.5 rounded-full">
+                      <Lock size={12} />
+                      加密
+                    </span>
+                  </Tooltip>
+                )}
               </div>
             </div>
           </div>
@@ -144,6 +158,19 @@ export function RoomHeader({
 
           {/* 右侧：邀请按钮和销毁按钮 */}
           <div className="flex items-center gap-3">
+            {encryptionEnabled && isCreator && encryptionKeyString && (
+              <Button
+                onClick={() => {
+                  onCopyEncryptionKey?.();
+                  setCopied(true);
+                  setTimeout(() => setCopied(false), 2000);
+                }}
+                icon={copied ? <Check size={16} /> : <Lock size={16} />}
+                className="h-10 px-4 bg-white border-green-500 text-green-600 hover:bg-green-50 hover:border-green-600 rounded-lg font-medium shadow-sm"
+              >
+                {copied ? '已复制密钥' : '复制加密密钥'}
+              </Button>
+            )}
             {isCreator && (
               <Button
                 onClick={(e) => {
