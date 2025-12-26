@@ -39,6 +39,7 @@ export function RoomHeader({
   onCopyEncryptionKey,
 }: RoomHeaderProps) {
   const [copied, setCopied] = useState(false);
+  const [isCopying, setIsCopying] = useState(false);
   const [destroyModalOpen, setDestroyModalOpen] = useState(false);
 
   // Debug: 渲染时的 isCreator 状态
@@ -83,16 +84,42 @@ export function RoomHeader({
 
   // 复制邀请链接
   const handleCopyInvite = async () => {
+    if (isCopying || copied) {
+      return; // 防止多次点击
+    }
+
     if (!inviteLink) {
       onGenerateInvite?.();
       return;
     }
 
+    setIsCopying(true);
+
     try {
       await navigator.clipboard.writeText(inviteLink);
       setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {}
+      setTimeout(() => {
+        setCopied(false);
+        setIsCopying(false);
+      }, 2000);
+    } catch {
+      setIsCopying(false);
+    }
+  };
+
+  // 复制加密密钥
+  const handleCopyEncryptionKey = () => {
+    if (isCopying || copied) {
+      return; // 防止多次点击
+    }
+
+    setIsCopying(true);
+    onCopyEncryptionKey?.();
+    setCopied(true);
+    setTimeout(() => {
+      setCopied(false);
+      setIsCopying(false);
+    }, 2000);
   };
 
   return (
@@ -160,11 +187,8 @@ export function RoomHeader({
           <div className="flex items-center gap-3">
             {encryptionEnabled && isCreator && encryptionKeyString && (
               <Button
-                onClick={() => {
-                  onCopyEncryptionKey?.();
-                  setCopied(true);
-                  setTimeout(() => setCopied(false), 2000);
-                }}
+                onClick={handleCopyEncryptionKey}
+                disabled={isCopying}
                 icon={copied ? <Check size={16} /> : <Lock size={16} />}
                 className="h-10 px-4 bg-white border-green-500 text-green-600 hover:bg-green-50 hover:border-green-600 rounded-lg font-medium shadow-sm"
               >
@@ -185,6 +209,7 @@ export function RoomHeader({
             )}
             <Button
               onClick={handleCopyInvite}
+              disabled={isCopying}
               icon={copied ? <Check size={16} /> : <Copy size={16} />}
               className="h-10 px-5 bg-blue-600 hover:bg-blue-700 border-none rounded-lg font-medium shadow-sm"
             >

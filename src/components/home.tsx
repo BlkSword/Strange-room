@@ -31,15 +31,23 @@ export default function Home() {
   const [ttl, setTtl] = useState<RoomTTL>(24);
   const [isCreating, setIsCreating] = useState(false);
   const [encryptionEnabled, setEncryptionEnabled] = useState(true);
+  const [createDisabled, setCreateDisabled] = useState(false);
 
   // 创建房间
   const handleCreateRoom = async () => {
-    if (!nickname.trim()) {
-      message.warning('请输入您的昵称');
+    if (!nickname.trim() || createDisabled) {
+      if (!nickname.trim()) {
+        message.warning('请输入您的昵称');
+      }
       return;
     }
 
+    // 禁用创建按钮，防止多次点击
+    setCreateDisabled(true);
     setIsCreating(true);
+
+    const startTime = Date.now();
+    const MIN_LOADING_TIME = 800; // 最小加载时间（毫秒）
 
     try {
       // 1. 调用 API 创建房间
@@ -48,6 +56,7 @@ export default function Home() {
       if (!createResult.success || !createResult.roomId) {
         message.error(createResult.error || '创建房间失败');
         setIsCreating(false);
+        setCreateDisabled(false);
         return;
       }
 
@@ -59,6 +68,7 @@ export default function Home() {
       if (!tokenResult.success || !tokenResult.token) {
         message.error('生成访问令牌失败');
         setIsCreating(false);
+        setCreateDisabled(false);
         return;
       }
 
@@ -90,6 +100,12 @@ export default function Home() {
         localStorage.setItem(`room-encryption-enabled-${roomId}`, 'true');
       }
 
+      // 确保最小加载时间，让用户看到加载动画
+      const elapsedTime = Date.now() - startTime;
+      if (elapsedTime < MIN_LOADING_TIME) {
+        await new Promise(resolve => setTimeout(resolve, MIN_LOADING_TIME - elapsedTime));
+      }
+
       message.success('房间创建成功！');
 
       // 5. 跳转到房间页面（带 token 参数）
@@ -97,8 +113,8 @@ export default function Home() {
     } catch (error) {
       console.error('[Home] 创建房间失败:', error);
       message.error('创建房间失败，请检查网络连接');
-    } finally {
       setIsCreating(false);
+      setCreateDisabled(false);
     }
   };
 
@@ -502,6 +518,7 @@ export default function Home() {
         width={480}
         styles={{ body: { padding: '24px' } }}
         confirmLoading={isCreating}
+        okButtonProps={{ disabled: createDisabled }}
         maskClosable={!isCreating}
         closable={!isCreating}
       >
