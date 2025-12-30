@@ -1,12 +1,12 @@
 /**
- * 房间布局组件 - 商业风格
+ * 房间布局组件 - 简约手绘风格
  */
 
 'use client';
 
 import { ReactNode } from 'react';
-import { MessageSquare, PenSquare, Code } from 'lucide-react';
-import { useState, use } from 'react';
+import { MessageSquare, PenSquare, Code, Sparkles } from 'lucide-react';
+import { useState } from 'react';
 
 interface RoomLayoutProps {
   children?: ReactNode;
@@ -34,16 +34,16 @@ export function RoomLayout({
   ];
 
   return (
-    <div className="flex h-[calc(100vh-73px)] bg-gray-50">
+    <div className="flex h-[calc(100vh-73px)] bg-sketch-background">
       {/* 左侧面板 - 用户列表 */}
-      <div className="w-64 border-r border-gray-200 bg-white">
+      <div className="w-64 border-r-2 border-sketch-black bg-sketch-card">
         {leftPanel}
       </div>
 
       {/* 中间 - 主内容区 */}
-      <div className="flex-1 flex flex-col bg-white">
+      <div className="flex-1 flex flex-col bg-sketch-background">
         {/* 标签切换 */}
-        <div className="flex items-center gap-1 px-4 py-3 border-b border-gray-200 bg-gray-50">
+        <div className="flex items-center gap-2 px-4 py-3 border-b-2 border-sketch-black bg-sketch-card">
           {tabs.map((tab) => {
             const Icon = tab.icon;
             const isActive = activeTab === tab.id;
@@ -52,14 +52,15 @@ export function RoomLayout({
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id)}
-                className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all ${
+                className={`flex items-center gap-2 px-5 py-2.5 rounded-sketch font-cave text-base transition-all border-2 ${
                   isActive
-                    ? 'bg-white text-blue-600 shadow-sm'
-                    : 'text-gray-600 hover:text-gray-900 hover:bg-white/50'
+                    ? 'bg-sketch-black text-sketch-background border-sketch-black shadow-sketch'
+                    : 'text-sketch-gray hover:text-sketch-black hover:bg-sketch-light border-transparent hover:border-sketch-black'
                 }`}
               >
                 <Icon size={18} />
                 <span>{tab.label}</span>
+                {isActive && <Sparkles size={14} className="text-sketch-background" />}
               </button>
             );
           })}
@@ -74,18 +75,21 @@ export function RoomLayout({
       </div>
 
       {/* 右侧面板 - 文件暂存区 */}
-      <div className="w-72 border-l border-gray-200 bg-white">
-        <div className="p-4 border-b border-gray-200">
-          <h3 className="font-semibold text-gray-900">文件暂存区</h3>
-          <p className="text-xs text-gray-500 mt-1">拖拽文件到此处共享</p>
+      <div className="w-72 border-l-2 border-sketch-black bg-sketch-card">
+        <div className="p-4 border-b-2 border-sketch-light">
+          <h3 className="font-semibold text-sketch-black font-cave text-lg flex items-center gap-2">
+            <Sparkles size={18} />
+            文件暂存区
+          </h3>
+          <p className="text-sm text-sketch-gray mt-1 font-cave">拖拽文件到此处共享</p>
         </div>
         <div className="p-4">
-          <div className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center hover:border-blue-400 hover:bg-blue-50/50 transition-colors cursor-pointer">
-            <div className="w-12 h-12 rounded-full bg-gray-100 flex items-center justify-center mx-auto mb-3">
-              <PenSquare size={24} className="text-gray-400" />
+          <div className="border-2 border-dashed border-sketch-gray rounded-sketch p-8 text-center hover:border-sketch-black hover:bg-sketch-light transition-all cursor-pointer mystic-card">
+            <div className="w-14 h-14 rounded-sketch bg-sketch-light flex items-center justify-center mx-auto mb-3 border-2 border-sketch-black">
+              <PenSquare size={28} className="text-sketch-black" />
             </div>
-            <p className="text-gray-600 text-sm font-medium">拖拽文件到此处</p>
-            <p className="text-gray-400 text-xs mt-1">支持图片、文档等</p>
+            <p className="text-sketch-gray text-base font-medium font-cave">拖拽文件到此处</p>
+            <p className="text-sketch-gray text-sm mt-1 font-cave">支持图片、文档等</p>
           </div>
         </div>
       </div>

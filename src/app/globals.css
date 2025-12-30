@@ -1,20 +1,278 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #faf8f5;
+  --foreground: #2c2c2c;
+  --sketch-black: #2c2c2c;
+  --sketch-gray: #666666;
+  --sketch-light: #e8e6e1;
+  --sketch-accent: #4a7c59;
+  --sketch-accent-light: #7ba378;
+  --sketch-border: #2c2c2c;
+  --card-bg: #ffffff;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-sketch-black: var(--sketch-black);
+  --color-sketch-gray: var(--sketch-gray);
+  --color-sketch-light: var(--sketch-light);
+  --color-sketch-accent: var(--sketch-accent);
+  --color-sketch-accent-light: var(--sketch-accent-light);
+  --color-sketch-border: var(--sketch-border);
+  --color-card-bg: var(--card-bg);
+  --font-handwriting: 'Caveat', cursive;
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
 
+/* 导入手写字体 */
+@import url('https://fonts.googleapis.com/css2?family=Caveat:wght@400;500;600;700&family=Permanent+Marker&display=swap');
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: 'Caveat', cursive, sans-serif;
+  position: relative;
+  overflow-x: hidden;
+  /* 轻微纸张纹理 */
+  background-image:
+    repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0, 0, 0, 0.01) 2px,
+      rgba(0, 0, 0, 0.01) 4px
+    );
+}
+
+/* 简约手绘边框 */
+.hand-drawn-border {
+  position: relative;
+  border: 2.5px solid var(--sketch-black);
+  border-radius: 4px;
+  background: var(--card-bg);
+  box-shadow: 3px 3px 0 rgba(44, 44, 44, 0.15);
+}
+
+/* 简约手绘按钮 */
+.hand-drawn-btn {
+  position: relative;
+  background: var(--sketch-black);
+  border: 2.5px solid var(--sketch-black);
+  border-radius: 4px;
+  padding: 12px 24px;
+  color: var(--background);
+  font-family: 'Caveat', cursive;
+  font-size: 1.1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-shadow: 3px 3px 0 rgba(44, 44, 44, 0.2);
+}
+
+.hand-drawn-btn:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 4px 4px 0 rgba(44, 44, 44, 0.25);
+}
+
+.hand-drawn-btn:active {
+  transform: translate(1px, 1px);
+  box-shadow: 2px 2px 0 rgba(44, 44, 44, 0.15);
+}
+
+/* 简约卡片 */
+.mystic-card {
+  background: var(--card-bg);
+  border: 2.5px solid var(--sketch-black);
+  border-radius: 4px;
+  padding: 24px;
+  box-shadow: 3px 3px 0 rgba(44, 44, 44, 0.12);
+  position: relative;
+}
+
+/* 简约输入框 */
+.hand-drawn-input {
+  background: var(--card-bg);
+  border: 2.5px solid var(--sketch-gray);
+  border-radius: 4px;
+  padding: 12px 16px;
+  color: var(--foreground);
+  font-family: 'Caveat', cursive;
+  font-size: 1rem;
+  transition: all 0.2s ease;
+}
+
+.hand-drawn-input:focus {
+  outline: none;
+  border-color: var(--sketch-black);
+  border-width: 2.5px;
+  box-shadow: 2px 2px 0 rgba(44, 44, 44, 0.1);
+}
+
+.hand-drawn-input::placeholder {
+  color: var(--sketch-gray);
+  opacity: 0.6;
+}
+
+/* 简约标题 */
+.hand-drawn-title {
+  font-family: 'Permanent Marker', cursive;
+  color: var(--sketch-black);
+}
+
+/* 滚动条样式 */
+::-webkit-scrollbar {
+  width: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--sketch-light);
+  border-radius: 2px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--sketch-gray);
+  border-radius: 2px;
+  border: 2px solid var(--sketch-light);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--sketch-black);
+}
+
+/* Ant Design 组件简约风格覆盖 */
+.ant-modal-content {
+  background: var(--card-bg) !important;
+  border: 2.5px solid var(--sketch-black) !important;
+  border-radius: 4px !important;
+  box-shadow: 5px 5px 0 rgba(44, 44, 44, 0.15) !important;
+}
+
+.ant-modal-header {
+  background: transparent !important;
+  border-bottom: 2px solid var(--sketch-light) !important;
+}
+
+.ant-modal-title {
+  color: var(--foreground) !important;
+  font-family: 'Caveat', cursive !important;
+  font-size: 1.25rem !important;
+  font-weight: 600 !important;
+}
+
+.ant-modal-close-x {
+  color: var(--sketch-gray) !important;
+}
+
+.ant-modal-close-x:hover {
+  color: var(--sketch-black) !important;
+}
+
+.ant-modal-body {
+  color: var(--foreground) !important;
+}
+
+.ant-btn-primary {
+  background: var(--sketch-black) !important;
+  border: 2.5px solid var(--sketch-black) !important;
+  border-radius: 4px !important;
+  font-family: 'Caveat', cursive !important;
+  box-shadow: 3px 3px 0 rgba(44, 44, 44, 0.2) !important;
+}
+
+.ant-btn-primary:hover {
+  background: var(--sketch-black) !important;
+  border-color: var(--sketch-black) !important;
+  transform: translate(-1px, -1px);
+  box-shadow: 4px 4px 0 rgba(44, 44, 44, 0.25) !important;
+}
+
+.ant-input,
+.ant-input-textarea {
+  background: var(--card-bg) !important;
+  border: 2px solid var(--sketch-gray) !important;
+  border-radius: 4px !important;
+  color: var(--foreground) !important;
+  font-family: 'Caveat', cursive !important;
+  font-size: 1rem !important;
+}
+
+.ant-input:focus,
+.ant-input-textarea:focus {
+  border-color: var(--sketch-black) !important;
+  border-width: 2.5px !important;
+  box-shadow: 2px 2px 0 rgba(44, 44, 44, 0.1) !important;
+}
+
+.ant-input::placeholder,
+.ant-input-textarea::placeholder {
+  color: var(--sketch-gray) !important;
+  opacity: 0.6 !important;
+}
+
+/* Radio.Button 简约风格 */
+.ant-radio-button-wrapper {
+  border: 2px solid var(--sketch-gray) !important;
+  border-radius: 4px !important;
+  font-family: 'Caveat', cursive !important;
+  transition: all 0.2s ease !important;
+}
+
+.ant-radio-button-wrapper:hover {
+  border-color: var(--sketch-black) !important;
+}
+
+.ant-radio-button-wrapper-checked {
+  background: var(--sketch-black) !important;
+  border-color: var(--sketch-black) !important;
+  color: var(--background) !important;
+}
+
+/* Switch 简约风格 */
+.ant-switch {
+  background: var(--sketch-light) !important;
+  border: 2px solid var(--sketch-gray) !important;
+  border-radius: 12px !important;
+}
+
+.ant-switch-checked {
+  background: var(--sketch-accent) !important;
+  border-color: var(--sketch-accent) !important;
+}
+
+/* Ant Design Message 简约风格 */
+.ant-message {
+  z-index: 9999 !important;
+}
+
+.ant-message-notice-content {
+  background: var(--card-bg) !important;
+  border: 2px solid var(--sketch-black) !important;
+  border-radius: 4px !important;
+  box-shadow: 3px 3px 0 rgba(44, 44, 44, 0.15) !important;
+  padding: 12px 20px !important;
+  font-family: 'Caveat', cursive !important;
+  font-size: 1rem !important;
+}
+
+.ant-message-success .anticon {
+  color: var(--sketch-accent) !important;
+}
+
+.ant-message-error .anticon {
+  color: #dc2626 !important;
+}
+
+.ant-message-warning .anticon {
+  color: #f59e0b !important;
+}
+
+.ant-message-info .anticon {
+  color: var(--sketch-black) !important;
+}
+
+.ant-message-notice-content .ant-message-icon > .anticon {
+  font-size: 18px !important;
 }

@@ -79,6 +79,10 @@ export default function RoomPage() {
 
   // 跟踪时间是否已校正，避免重复校正
   const timeSyncedRef = useRef(false);
+  // 跟踪连接状态变化，避免重复提示
+  const connectionStatusRef = useRef<{ isConnected: boolean; hasNotified: boolean }>({ isConnected: false, hasNotified: false });
+  // 跟踪之前的在线用户数量
+  const prevOnlineUsersCountRef = useRef<number>(0);
 
   // 房间销毁处理回调
   const handleRoomDestroyed = useCallback((reason: 'expired' | 'creator_left' | 'manual') => {
@@ -121,6 +125,52 @@ export default function RoomPage() {
     encryptionKey, // 传递加密密钥
     encryptionEnabled: !!encryptionKey, // 启用加密
   });
+
+  // 监听连接状态变化，显示消息提示
+  useEffect(() => {
+    const prevStatus = connectionStatusRef.current.isConnected;
+    const currentStatus = isConnected;
+
+    if (prevStatus !== currentStatus) {
+      connectionStatusRef.current.isConnected = currentStatus;
+
+      if (currentStatus && !connectionStatusRef.current.hasNotified) {
+        message.success('已连接到房间');
+        connectionStatusRef.current.hasNotified = true;
+      } else if (!currentStatus) {
+        message.warning('连接已断开，正在重新连接...');
+        connectionStatusRef.current.hasNotified = false;
+      }
+    }
+  }, [isConnected]);
+
+  // 监听在线用户变化
+  useEffect(() => {
+    const currentCount = onlineUsers.length;
+    const prevCount = prevOnlineUsersCountRef.current;
+
+    // 只在用户数量变化且已连接时提示
+    if (connectionStatusRef.current.isConnected && currentCount !== prevCount && prevCount > 0) {
+      if (currentCount > prevCount) {
+        // 新用户加入
+        const newUsers = onlineUsers.filter(u => {
+          const prevUserIds = onlineUsers.slice(0, prevCount).map(pu => pu.user?.id);
+          return !prevUserIds.includes(u.user?.id);
+        });
+        newUsers.forEach(u => {
+          if (u.user?.id !== peerId) {
+            message.info(`${u.user?.name || '用户'} 加入了房间`);
+          }
+        });
+      } else if (currentCount < prevCount) {
+        // 用户离开（但不包括自己）
+        message.info('有人离开了房间');
+      }
+    }
+
+    // 更新引用
+    prevOnlineUsersCountRef.current = currentCount;
+  }, [onlineUsers, isConnected, peerId]);
 
   // 初始化房间
   useEffect(() => {
@@ -458,10 +508,10 @@ export default function RoomPage() {
   // 加载中
   if (isLoading) {
     return (
-      <div className="h-screen flex items-center justify-center bg-white">
+      <div className="h-screen flex items-center justify-center bg-sketch-background">
         <div className="text-center">
-          <div className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-          <p className="text-gray-600 font-medium">正在连接房间...</p>
+          <div className="w-16 h-16 border-4 border-sketch-gray border-t-sketch-black rounded-full animate-spin mx-auto mb-4" />
+          <p className="text-sketch-gray font-medium font-cave text-lg">正在连接房间...</p>
         </div>
       </div>
     );
@@ -470,25 +520,25 @@ export default function RoomPage() {
   // 没有令牌或被拒绝访问
   if (!hasToken || accessDenied) {
     return (
-      <div className="h-screen flex items-center justify-center bg-gray-50">
-        <div className="text-center bg-white p-8 rounded-xl shadow-lg max-w-md">
-          <div className="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-4">
-            <svg className="w-8 h-8 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <div className="h-screen flex items-center justify-center bg-sketch-background">
+        <div className="text-center mystic-card hand-drawn-border max-w-md p-8">
+          <div className="w-20 h-20 bg-sketch-light rounded-full flex items-center justify-center mx-auto mb-4 border-2 border-sketch-black">
+            <svg className="w-10 h-10 text-sketch-black" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
             </svg>
           </div>
-          <h2 className="text-xl font-bold text-gray-900 mb-2">访问被拒绝</h2>
-          <p className="text-gray-600 mb-4">您没有权限访问此房间</p>
-          <p className="text-sm text-gray-500 mb-6">请使用房间创建者分享的邀请链接进入</p>
-          <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3 mb-6 text-left">
-            <p className="text-xs text-yellow-800">
+          <h2 className="text-2xl font-bold text-sketch-black mb-2 font-cave">访问被拒绝</h2>
+          <p className="text-sketch-gray mb-4 font-cave">您没有权限访问此房间</p>
+          <p className="text-sm text-sketch-gray mb-6 font-cave">请使用房间创建者分享的邀请链接进入</p>
+          <div className="bg-sketch-light border-2 border-sketch-black rounded-sketch p-4 mb-6 text-left">
+            <p className="text-sm text-sketch-gray font-cave">
               <strong>提示：</strong>邀请链接格式应为：<br />
-              <code className="text-xs">http://localhost:3000/join/房间ID?token=xxx</code>
+              <code className="text-xs text-sketch-black">http://localhost:3000/join/房间ID?token=xxx</code>
             </p>
           </div>
           <button
             onClick={() => router.push('/')}
-            className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium"
+            className="hand-drawn-btn font-cave"
           >
             返回首页
           </button>
@@ -500,17 +550,17 @@ export default function RoomPage() {
   // 房间未加载完成
   if (!room || !nickname) {
     return (
-      <div className="h-screen flex items-center justify-center bg-white">
+      <div className="h-screen flex items-center justify-center bg-sketch-background">
         <div className="text-center">
-          <div className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-          <p className="text-gray-600 font-medium">正在加载房间...</p>
+          <div className="w-16 h-16 border-4 border-sketch-gray border-t-sketch-black rounded-full animate-spin mx-auto mb-4" />
+          <p className="text-sketch-gray font-medium font-cave text-lg">正在加载房间...</p>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="h-screen bg-white flex flex-col">
+    <div className="h-screen bg-sketch-background flex flex-col">
       {/* 房间头部 */}
       <RoomHeader
         roomId={roomId}

@@ -6,6 +6,7 @@
 
 import { useRef, useEffect, useState, useCallback } from 'react';
 import { Pen, Eraser, Square, Circle, Trash2, Download } from 'lucide-react';
+import { message } from 'antd';
 import type { YjsManager } from '@/lib/yjs/y-doc';
 
 type Tool = 'pen' | 'eraser' | 'rect' | 'circle';
@@ -315,17 +316,27 @@ export function Canvas({ roomId, userId, userName, yjs }: WhiteboardProps) {
 
     const ctx = canvas.getContext('2d');
     ctx?.clearRect(0, 0, canvas.width, canvas.height);
+    message.success('画布已清空');
   };
 
   // 下载画布
   const handleDownload = () => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (!canvas) {
+      message.error('下载失败：画布未就绪');
+      return;
+    }
 
-    const link = document.createElement('a');
-    link.download = `whiteboard-${roomId}-${Date.now()}.png`;
-    link.href = canvas.toDataURL();
-    link.click();
+    try {
+      const link = document.createElement('a');
+      link.download = `whiteboard-${roomId}-${Date.now()}.png`;
+      link.href = canvas.toDataURL();
+      link.click();
+      message.success('画布已下载');
+    } catch (error) {
+      console.error('[Canvas] 下载画布失败:', error);
+      message.error('下载失败，请重试');
+    }
   };
 
   return (

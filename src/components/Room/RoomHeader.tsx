@@ -1,11 +1,11 @@
 /**
- * 房间头部组件 - 商业风格
+ * 房间头部组件 - 简约手绘风格
  */
 
 'use client';
 
 import { RoomTTL } from '@/types/room';
-import { Clock, Users, Share2, Copy, Check, Crown, Shield, Trash2, Lock } from 'lucide-react';
+import { Clock, Users, Share2, Copy, Check, Crown, Shield, Trash2, Lock, Sparkles } from 'lucide-react';
 import { useState } from 'react';
 import { Button, Badge, Tooltip, Modal } from 'antd';
 
@@ -42,17 +42,12 @@ export function RoomHeader({
   const [isCopying, setIsCopying] = useState(false);
   const [destroyModalOpen, setDestroyModalOpen] = useState(false);
 
-  // Debug: 渲染时的 isCreator 状态
-  console.log('[RoomHeader] 渲染, isCreator:', isCreator, 'roomId:', roomId);
-
   // 销毁房间确认
   const handleDestroyRoom = () => {
-    console.log('[RoomHeader] handleDestroyRoom 被调用, isCreator:', isCreator);
     setDestroyModalOpen(true);
   };
 
   const handleDestroyConfirm = () => {
-    console.log('[RoomHeader] 用户确认销毁房间, 调用 onDestroyRoom');
     setDestroyModalOpen(false);
     onDestroyRoom?.();
   };
@@ -123,38 +118,41 @@ export function RoomHeader({
   };
 
   return (
-    <div className="bg-white border-b border-gray-200">
+    <div className="bg-sketch-card border-b-2 border-sketch-black">
       <div className="px-6 py-4">
         <div className="flex items-center justify-between">
           {/* 左侧：房间信息 */}
           <div className="flex items-center gap-4">
             <div>
               <div className="flex items-center gap-3">
-                <h1 className="text-xl font-bold text-gray-900">{roomName}</h1>
+                <h1 className="text-2xl font-bold text-sketch-black font-cave flex items-center gap-2">
+                  <Sparkles size={20} />
+                  {roomName}
+                </h1>
                 {isCreator && (
                   <Tooltip title="房间创建者">
                     <Badge
-                      count={<Crown size={12} className="text-amber-600" />}
+                      count={<Crown size={14} className="text-sketch-accent" />}
                       showZero
-                      className="bg-amber-50 border-amber-200"
+                      className="bg-sketch-light border-2 border-sketch-black"
                     />
                   </Tooltip>
                 )}
               </div>
-              <div className="flex items-center gap-4 mt-1 text-sm text-gray-500">
+              <div className="flex items-center gap-4 mt-2 text-sm text-sketch-gray font-cave">
                 <span className="flex items-center gap-1.5">
-                  <span className="font-mono bg-gray-100 px-2 py-0.5 rounded text-xs">
+                  <span className="font-mono bg-sketch-light px-3 py-1 rounded-sketch text-xs text-sketch-black border-2 border-sketch-black">
                     #{roomId}
                   </span>
                 </span>
                 <span className="flex items-center gap-1.5">
-                  <Users size={14} />
+                  <Users size={16} />
                   {onlineCount} 人在线
                 </span>
                 {encryptionEnabled && (
                   <Tooltip title="端到端加密已启用，消息内容只有房间成员可以查看">
-                    <span className="flex items-center gap-1.5 text-green-600 bg-green-50 px-2 py-0.5 rounded-full">
-                      <Lock size={12} />
+                    <span className="flex items-center gap-1.5 text-sketch-black bg-sketch-light px-3 py-1 rounded-sketch border-2 border-sketch-black">
+                      <Lock size={14} />
                       加密
                     </span>
                   </Tooltip>
@@ -166,16 +164,20 @@ export function RoomHeader({
           {/* 中间：倒计时 */}
           <div className="flex items-center gap-6">
             <div className="text-center">
-              <div className={`flex items-center gap-2 text-2xl font-mono font-semibold ${
-                isUrgent ? 'text-red-600' : isNearExpiry ? 'text-amber-600' : 'text-gray-900'
+              <div className={`flex items-center gap-2 text-3xl font-mono font-semibold font-cave ${
+                isUrgent ? 'text-red-500 animate-pulse' : isNearExpiry ? 'text-amber-600' : 'text-sketch-black'
               }`}>
-                <Clock size={20} className={isUrgent ? 'animate-pulse' : ''} />
+                <Clock size={24} className={isUrgent ? 'animate-pulse' : ''} />
                 {formatTime(remainingTime)}
               </div>
-              <div className="w-48 h-1.5 bg-gray-100 rounded-full mt-2 overflow-hidden">
+              <div className="w-52 h-2 bg-sketch-light rounded-sketch mt-2 overflow-hidden border-2 border-sketch-black">
                 <div
-                  className={`h-full transition-all duration-1000 ${
-                    isUrgent ? 'bg-red-500' : isNearExpiry ? 'bg-amber-500' : 'bg-emerald-500'
+                  className={`h-full transition-all duration-1000 rounded-sketch ${
+                    isUrgent
+                      ? 'bg-red-500'
+                      : isNearExpiry
+                      ? 'bg-amber-500'
+                      : 'bg-sketch-accent'
                   }`}
                   style={{ width: `${getPercent()}%` }}
                 />
@@ -189,20 +191,18 @@ export function RoomHeader({
               <Button
                 onClick={handleCopyEncryptionKey}
                 disabled={isCopying}
-                icon={copied ? <Check size={16} /> : <Lock size={16} />}
-                className="h-10 px-4 bg-white border-green-500 text-green-600 hover:bg-green-50 hover:border-green-600 rounded-lg font-medium shadow-sm"
+                icon={copied ? <Check size={18} /> : <Lock size={18} />}
+                className="hand-drawn-btn font-cave"
               >
                 {copied ? '已复制密钥' : '复制加密密钥'}
               </Button>
             )}
             {isCreator && (
               <Button
-                onClick={(e) => {
-                  console.log('[RoomHeader] 销毁按钮点击事件触发');
-                  handleDestroyRoom();
-                }}
-                icon={<Trash2 size={16} />}
-                className="h-10 px-5 bg-white border-red-300 text-red-600 hover:bg-red-50 hover:border-red-400 rounded-lg font-medium shadow-sm"
+                onClick={handleDestroyRoom}
+                icon={<Trash2 size={18} />}
+                className="hand-drawn-btn bg-red-600 hover:bg-red-700 font-cave"
+                style={{ backgroundColor: '#dc2626', borderColor: '#dc2626' }}
               >
                 销毁房间
               </Button>
@@ -210,8 +210,8 @@ export function RoomHeader({
             <Button
               onClick={handleCopyInvite}
               disabled={isCopying}
-              icon={copied ? <Check size={16} /> : <Copy size={16} />}
-              className="h-10 px-5 bg-blue-600 hover:bg-blue-700 border-none rounded-lg font-medium shadow-sm"
+              icon={copied ? <Check size={18} /> : <Share2 size={18} />}
+              className="hand-drawn-btn font-cave"
             >
               {copied ? '已复制' : '分享房间'}
             </Button>
@@ -220,9 +220,9 @@ export function RoomHeader({
 
         {/* 安全提示 */}
         {isCreator && (
-          <div className="mt-4 flex items-center gap-2 px-4 py-2 bg-blue-50 rounded-lg">
-            <Shield size={16} className="text-blue-600" />
-            <span className="text-sm text-blue-700">
+          <div className="mt-4 flex items-center gap-2 px-4 py-3 bg-sketch-light rounded-sketch border-2 border-sketch-black">
+            <Shield size={18} className="text-sketch-accent" />
+            <span className="text-sm text-sketch-gray font-cave">
               作为创建者，你可以随时销毁此房间。所有数据将在房间关闭后永久删除。
             </span>
           </div>
@@ -231,7 +231,9 @@ export function RoomHeader({
 
       {/* 销毁房间确认弹窗 */}
       <Modal
-        title="确认销毁房间"
+        title={
+          <span className="text-sketch-black font-cave text-xl">确认销毁房间</span>
+        }
         open={destroyModalOpen}
         onOk={handleDestroyConfirm}
         onCancel={() => setDestroyModalOpen(false)}
@@ -241,7 +243,7 @@ export function RoomHeader({
         centered
         maskClosable
       >
-        <p>此操作将永久销毁房间，所有数据将被删除且无法恢复。是否继续？</p>
+        <p className="text-sketch-gray font-cave">此操作将永久销毁房间，所有数据将被删除且无法恢复。是否继续？</p>
       </Modal>
     </div>
   );

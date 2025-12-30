@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <!-- 背景圆 -->
+  <circle cx="50" cy="50" r="48" fill="#faf8f5" stroke="#2c2c2c" stroke-width="3"/>
+  <!-- 星星图标 -->
+  <path d="M50 20 L56 38 L75 38 L60 50 L66 68 L50 56 L34 68 L40 50 L25 38 L44 38 Z" fill="#2c2c2c"/>
+</svg>
