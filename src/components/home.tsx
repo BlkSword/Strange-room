@@ -96,10 +96,6 @@ export default function Home() {
       localStorage.setItem(`user-nickname-${roomId}`, nickname);
       localStorage.setItem(`room-token-${roomId}`, token);
 
-      if (encryptionEnabled) {
-        localStorage.setItem(`room-encryption-enabled-${roomId}`, 'true');
-      }
-
       const elapsedTime = Date.now() - startTime;
       if (elapsedTime < MIN_LOADING_TIME) {
         await new Promise(resolve => setTimeout(resolve, MIN_LOADING_TIME - elapsedTime));

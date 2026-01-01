@@ -150,7 +150,7 @@ export function ChatBox({ messages, currentUserId, onSendMessage, onlineUsers = 
                     <div
                       className={`px-5 py-3 rounded-sketch border-2 ${
                         isCurrentUser
-                          ? 'bg-sketch-black text-sketch-background border-sketch-black shadow-sketch'
+                          ? 'bg-sketch-background text-sketch-black border-sketch-black shadow-sketch'
                           : 'bg-sketch-light text-sketch-black border-sketch-black'
                       }`}
                     >
@@ -193,12 +193,12 @@ export function ChatBox({ messages, currentUserId, onSendMessage, onlineUsers = 
             />
           </div>
           <Button
-            type="primary"
+            type="default"
             icon={<Send size={18} />}
             onClick={handleSend}
             disabled={!input.trim() || isSending}
             loading={isSending}
-            className="hand-drawn-btn h-12 w-12 flex items-center justify-center p-0"
+            className="hand-drawn-btn h-12 w-12 flex items-center justify-center p-0 !bg-white !text-sketch-black !border-sketch-black hover:!bg-gray-50"
           />
         </div>
       </div>

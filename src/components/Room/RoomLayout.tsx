@@ -54,13 +54,13 @@ export function RoomLayout({
                 onClick={() => setActiveTab(tab.id)}
                 className={`flex items-center gap-2 px-5 py-2.5 rounded-sketch font-cave text-base transition-all border-2 ${
                   isActive
-                    ? 'bg-sketch-black text-sketch-background border-sketch-black shadow-sketch'
+                    ? 'bg-sketch-background text-sketch-black border-sketch-black shadow-sketch'
                     : 'text-sketch-gray hover:text-sketch-black hover:bg-sketch-light border-transparent hover:border-sketch-black'
                 }`}
               >
                 <Icon size={18} />
                 <span>{tab.label}</span>
-                {isActive && <Sparkles size={14} className="text-sketch-background" />}
+                {isActive && <Sparkles size={14} className="text-sketch-black" />}
               </button>
             );
           })}
