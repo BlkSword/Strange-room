@@ -5,6 +5,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { RoomManager } from '@/lib/room/room-manager';
 import { Room, RoomTTL, PeerInfo } from '@/types/room';
+import { destroyRoom as destroyRoomApi } from '@/lib/server/api';
 
 const USER_COLORS = [
   '#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A', '#98D8C8',
@@ -27,9 +28,9 @@ export function useRoom(options?: UseRoomOptions) {
 
   // 当外部传入的 peerId 变化时，更新 peerIdRef
   useEffect(() => {
-    if (options?.peerId && options.peerId !== 'temp_user') {
+    if (options?.peerId && options.peerId !== 'temp_user' && options.peerId !== peerIdRef.current) {
       peerIdRef.current = options.peerId;
-      console.log('[useRoom] peerId 已更新:', options.peerId);
+      console.log('[useRoom] peerId 已更新:', options.peerId, '（旧值:', peerIdRef.current, '）');
     }
   }, [options?.peerId]);
 
@@ -112,9 +113,9 @@ export function useRoom(options?: UseRoomOptions) {
   }, []);
 
   // 销毁房间（仅创建者）
-  const destroyRoom = useCallback(() => {
+  const destroyRoom = useCallback(async () => {
     const manager = roomManagerRef.current;
-    if (!manager) return;
+    if (!manager) return false;
 
     // 双重检查：只有创建者才能销毁房间
     if (!isCreator) {
@@ -122,9 +123,24 @@ export function useRoom(options?: UseRoomOptions) {
       return false;
     }
 
+    // 先调用服务器 API 销毁房间
+    if (room) {
+      try {
+        const result = await destroyRoomApi(room.id);
+        if (!result.success) {
+          console.error('[Room] 销毁房间失败:', result.error);
+          return false;
+        }
+      } catch (error) {
+        console.error('[Room] 销毁房间 API 调用失败:', error);
+        return false;
+      }
+    }
+
+    // 本地销毁
     manager.destroyRoom('manual');
     return true;
-  }, [isCreator]);
+  }, [isCreator, room]);
 
   // 踢出用户
   const kickPeer = useCallback((targetPeerId: string) => {

@@ -13,6 +13,7 @@ export interface CreateRoomResponse {
 
 export interface CheckRoomResponse {
   exists: boolean;
+  destroyed?: boolean;
   room?: {
     createdAt: number;
     expiresAt: number;
@@ -30,6 +31,12 @@ export interface GenerateTokenResponse {
 export interface ValidateTokenResponse {
   valid: boolean;
   roomId?: string;
+  error?: string;
+}
+
+export interface DestroyRoomResponse {
+  success: boolean;
+  message?: string;
   error?: string;
 }
 
@@ -113,5 +120,33 @@ export async function healthCheck(): Promise<any> {
     return await response.json();
   } catch (error) {
     return null;
+  }
+}
+
+/**
+ * 销毁房间
+ */
+export async function destroyRoom(roomId: string): Promise<DestroyRoomResponse> {
+  try {
+    const response = await fetch(`${SERVER_URL}/api/room/destroy`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ roomId }),
+    });
+
+    const data = await response.json();
+
+    // 处理不同的 HTTP 状态码
+    if (response.status === 404) {
+      return { success: false, error: 'Room not found' };
+    }
+    if (response.status === 410) {
+      return { success: false, error: 'Room already destroyed' };
+    }
+
+    return data;
+  } catch (error) {
+    console.error('[API] 销毁房间失败:', error);
+    return { success: false, error: 'Network error' };
   }
 }

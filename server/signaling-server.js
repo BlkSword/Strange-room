@@ -16,7 +16,7 @@ const TOKEN_EXPIRY = 30 * 24 * 60 * 60 * 1000; // 30天
 const ROOM_EXPIRY = 48 * 60 * 60 * 1000; // 48小时
 
 // ========== 数据存储 ==========
-const rooms = new Map(); // roomId -> { createdAt, expiresAt, creator }
+const rooms = new Map(); // roomId -> { createdAt, expiresAt, creator, destroyed }
 const roomClients = new Map(); // roomId -> Set<WebSocket>
 const rateLimits = new Map(); // IP -> { count, resetTime }
 
@@ -216,6 +216,7 @@ const server = http.createServer((req, res) => {
           createdAt: now,
           expiresAt,
           creator: creatorName || '未知',
+          destroyed: false,
         });
 
         // 初始化房间客户端集合
@@ -243,9 +244,20 @@ const server = http.createServer((req, res) => {
     const roomId = pathname.split('/').pop();
     const room = rooms.get(roomId);
 
+    // 检查房间是否被销毁
+    if (room && room.destroyed) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        exists: false,
+        destroyed: true,
+      }));
+      return;
+    }
+
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       exists: !!room,
+      destroyed: false,
       room: room ? {
         createdAt: room.createdAt,
         expiresAt: room.expiresAt,
@@ -264,9 +276,17 @@ const server = http.createServer((req, res) => {
         const { roomId } = JSON.parse(body);
 
         // 验证房间是否存在
-        if (!rooms.has(roomId)) {
+        const room = rooms.get(roomId);
+        if (!room) {
           res.writeHead(404, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ success: false, error: 'Room not found' }));
+          return;
+        }
+
+        // 检查房间是否被销毁
+        if (room.destroyed) {
+          res.writeHead(410, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: 'Room destroyed' }));
           return;
         }
 
@@ -302,6 +322,78 @@ const server = http.createServer((req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));
       } catch (error) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: 'Invalid request' }));
+      }
+    });
+    return;
+  }
+
+  // API: 销毁房间
+  if (pathname === '/api/room/destroy' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try {
+        const { roomId } = JSON.parse(body);
+        const room = rooms.get(roomId);
+
+        if (!room) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: 'Room not found' }));
+          return;
+        }
+
+        if (room.destroyed) {
+          res.writeHead(410, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: 'Room already destroyed' }));
+          return;
+        }
+
+        // 标记房间为已销毁
+        room.destroyed = true;
+
+        // 关闭所有 WebSocket 连接
+        const clients = roomClients.get(roomId);
+        if (clients) {
+          clients.forEach((ws) => {
+            try {
+              ws.close(1000, 'Room destroyed');
+            } catch (e) {
+              // Ignore close errors
+            }
+          });
+          roomClients.delete(roomId);
+        }
+
+        // 关闭 Yjs WebSocket 连接
+        const yjsClients = getYjsRoomClients(roomId);
+        if (yjsClients) {
+          yjsClients.forEach((ws) => {
+            try {
+              ws.close(1000, 'Room destroyed');
+            } catch (e) {
+              // Ignore close errors
+            }
+          });
+          yjsRooms.delete(roomId);
+        }
+
+        // 延迟删除房间数据（给客户端时间收到销毁消息）
+        setTimeout(() => {
+          rooms.delete(roomId);
+          console.log(`[Server] 房间数据已删除: ${roomId}`);
+        }, 5000);
+
+        console.log(`[Server] 销毁房间: ${roomId}`);
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          success: true,
+          message: 'Room destroyed'
+        }));
+      } catch (error) {
+        console.error('[Server] 销毁房间错误:', error);
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: false, error: 'Invalid request' }));
       }
@@ -397,6 +489,14 @@ yjsWss.on('connection', (ws, req) => {
     return;
   }
 
+  // 检查房间是否被销毁
+  if (room.destroyed) {
+    securityLog('YJS_WS_REJECTED', { reason: 'room_destroyed', roomId, ip: clientIP });
+    console.log(`[Yjs-WS] 拒绝连接: 房间已销毁 ${roomId}`);
+    ws.close(1008, 'room_destroyed');
+    return;
+  }
+
   // 验证令牌
   const tokenValidation = validateToken(token);
   if (!tokenValidation.valid || tokenValidation.roomId !== roomId) {
@@ -481,6 +581,14 @@ wss.on('connection', (ws, req) => {
     securityLog('WS_REJECTED', { reason: 'room_not_found', roomId, ip: clientIP });
     console.log(`[Server] 拒绝连接: 房间不存在 ${roomId}`);
     ws.close(1008, 'Room not found');
+    return;
+  }
+
+  // 检查房间是否被销毁
+  if (room.destroyed) {
+    securityLog('WS_REJECTED', { reason: 'room_destroyed', roomId, ip: clientIP });
+    console.log(`[Server] 拒绝连接: 房间已销毁 ${roomId}`);
+    ws.close(1008, 'Room destroyed');
     return;
   }
 

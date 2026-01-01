@@ -6,8 +6,9 @@
 
 import { useEffect, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
-import { validateToken } from '@/lib/server/api';
-import { Modal, message, Input } from 'antd';
+import { validateToken, checkRoom } from '@/lib/server/api';
+import { Modal, message, Input, Button } from 'antd';
+import { Home } from 'lucide-react';
 
 export default function JoinPage() {
   const params = useParams();
@@ -21,6 +22,7 @@ export default function JoinPage() {
   const [isMounted, setIsMounted] = useState(false);
   const [nickname, setNickname] = useState('');
   const [modalVisible, setModalVisible] = useState(false);
+  const [roomCheckDestroyed, setRoomCheckDestroyed] = useState(false);
 
   useEffect(() => {
     setIsMounted(true);
@@ -53,6 +55,15 @@ export default function JoinPage() {
     if (!urlToken) return;
 
     try {
+      // 先检查房间状态
+      const roomCheck = await checkRoom(roomId);
+
+      if (!roomCheck.exists) {
+        setRoomCheckDestroyed(roomCheck.destroyed || false);
+        setIsLoading(false);
+        return;
+      }
+
       // 调用 API 验证令牌
       const result = await validateToken(urlToken);
 
@@ -108,33 +119,35 @@ export default function JoinPage() {
 
   return (
     <>
-      <div className="h-screen flex items-center justify-center bg-white">
-        <div className="text-center">
+      <div className="min-h-screen bg-sketch-background flex items-center justify-center px-6">
+        <div className="text-center max-w-lg">
           {isLoading ? (
             <>
-              <div className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-              <p className="text-gray-600 font-medium">正在验证邀请链接...</p>
+              <div className="w-16 h-16 border-4 border-sketch-gray border-t-sketch-black rounded-full animate-spin mx-auto mb-4" />
+              <p className="text-sketch-gray font-medium font-cave text-lg">正在验证邀请链接...</p>
             </>
           ) : !isValid ? (
             <>
-              <div className="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                <svg className="w-8 h-8 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </div>
-              <h2 className="text-xl font-bold text-gray-900 mb-2">邀请链接无效</h2>
-              <p className="text-gray-600 mb-6">该链接可能已过期或不存在</p>
-              <button
+              <h1 className="text-5xl md:text-6xl font-marker mb-6 leading-tight hand-drawn-title text-sketch-black">
+                无法加入房间
+              </h1>
+              <p className="text-xl text-sketch-gray mb-8 font-cave">
+                {roomCheckDestroyed ? '房间已被销毁' : '房间不存在或已过期'}
+              </p>
+              <Button
+                type="primary"
+                size="large"
+                icon={<Home size={20} />}
+                className="hand-drawn-btn text-lg px-8"
                 onClick={() => router.push('/')}
-                className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium"
               >
                 返回首页
-              </button>
+              </Button>
             </>
           ) : (
             <>
-              <div className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-              <p className="text-gray-600 font-medium">正在进入房间...</p>
+              <div className="w-16 h-16 border-4 border-sketch-gray border-t-sketch-black rounded-full animate-spin mx-auto mb-4" />
+              <p className="text-sketch-gray font-medium font-cave text-lg">正在进入房间...</p>
             </>
           )}
         </div>

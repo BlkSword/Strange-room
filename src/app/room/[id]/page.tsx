@@ -9,7 +9,6 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { RoomHeader } from '@/components/Room/RoomHeader';
 import { RoomLayout } from '@/components/Room/RoomLayout';
-import { UserList } from '@/components/Room/UserList';
 import { ChatBox } from '@/components/Chat/ChatBox';
 import { Canvas } from '@/components/Whiteboard/Canvas';
 import { MonacoEditor } from '@/components/Editor/MonacoEditor';
@@ -210,10 +209,14 @@ export default function RoomPage() {
         if (savedNickname) {
           setNickname(savedNickname);
 
-          // 检查是否是创建者 - 比对基于昵称生成的 peer ID
-          const amICreator = parsed.creatorPeerId === userPeerId;
+          // 检查是否是创建者 - 直接基于保存的昵称重新计算 peer ID
+          const calculatedPeerId = generateStableIdFromNickname(savedNickname, roomId);
+          const amICreator = parsed.creatorPeerId === calculatedPeerId;
 
-          console.log('[Room] 返回用户 - 我的peerId:', userPeerId, '创建者peerId:', parsed.creatorPeerId, '是创建者:', amICreator);
+          console.log('[Room] 返回用户 - 计算的peerId:', calculatedPeerId, '创建者peerId:', parsed.creatorPeerId, '是创建者:', amICreator);
+
+          // 立即更新 userPeerId
+          setUserPeerId(calculatedPeerId);
 
           const room: Room = {
             ...parsed,
@@ -387,13 +390,14 @@ export default function RoomPage() {
     localStorage.removeItem(`room-data-${roomId}`);
     localStorage.removeItem(`user-nickname-${roomId}`);
     localStorage.removeItem(`room-token-${roomId}`);
-    yjs?.clearAllData();
+    // 销毁 Yjs 实例，断开 WebSocket 连接
+    yjs?.destroy();
     setDestroyModalOpen(false);
     router.push('/');
   }, [roomId, yjs, router]);
 
   // 销毁房间处理
-  const handleDestroyRoom = useCallback(() => {
+  const handleDestroyRoom = useCallback(async () => {
     console.log('[Room] 点击销毁房间按钮, isCreator:', isCreator, 'peerId:', peerId);
 
     if (!isCreator) {
@@ -402,15 +406,14 @@ export default function RoomPage() {
     }
 
     console.log('[Room] 调用 destroyRoom...');
-    // 调用 destroyRoom
-    const success = destroyRoom();
+    // 调用 destroyRoom（成功后会自动触发 onRoomDestroyed 回调显示Modal）
+    const success = await destroyRoom();
 
     console.log('[Room] destroyRoom 返回:', success);
-    if (success) {
-      message.success('房间已销毁');
-    } else {
+    if (!success) {
       message.error('销毁房间失败');
     }
+    // 成功时不需要额外提示，Modal会自动显示
   }, [isCreator, destroyRoom, peerId]);
 
   // 生成邀请链接
@@ -421,7 +424,11 @@ export default function RoomPage() {
     const result = await generateToken(room.id);
 
     if (!result.success || !result.token) {
-      message.error('生成邀请链接失败');
+      if (result.error === 'Room destroyed') {
+        message.error('房间已被销毁，无法生成邀请链接');
+      } else {
+        message.error(result.error || '生成邀请链接失败');
+      }
       return;
     }
 
@@ -572,6 +579,7 @@ export default function RoomPage() {
         inviteLink={inviteLink}
         encryptionEnabled={encryptionEnabledState && hasEncryption}
         encryptionKeyString={encryptionKey}
+        onlineUsers={getAllUsers()}
         onGenerateInvite={handleGenerateInvite}
         onDestroyRoom={handleDestroyRoom}
         onCopyEncryptionKey={handleCopyEncryptionKey}
@@ -579,7 +587,6 @@ export default function RoomPage() {
 
       {/* 房间布局 */}
       <RoomLayout
-        leftPanel={<UserList users={getAllUsers()} currentUserId={peerId} />}
         chatPanel={
           <ChatBox
             messages={encryptionEnabledState && hasEncryption ? decryptedMessages : chatMessages}
@@ -643,15 +650,34 @@ export default function RoomPage() {
 
       {/* 房间销毁通知 Modal */}
       <Modal
-        title={getDestroyReasonText(destroyReason).title}
+        title={null}
         open={destroyModalOpen}
         onOk={handleDestroyConfirm}
         okText="返回首页"
         cancelButtonProps={{ style: { display: 'none' } }}
         centered
         maskClosable={false}
+        footer={null}
+        closable={false}
+        wrapClassName="custom-empty-modal"
       >
-        <p>{getDestroyReasonText(destroyReason).content}</p>
+        <div className="text-center py-6">
+          <div className="w-20 h-20 bg-sketch-light rounded-full flex items-center justify-center mx-auto mb-6 border-2 border-sketch-black">
+            <svg className="w-10 h-10 text-sketch-black" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+            </svg>
+          </div>
+          <h2 className="text-2xl font-bold text-sketch-black mb-3 font-cave">房间已销毁</h2>
+          <p className="text-sketch-gray mb-8 font-cave text-lg">
+            {getDestroyReasonText(destroyReason).content}
+          </p>
+          <button
+            onClick={handleDestroyConfirm}
+            className="hand-drawn-btn font-cave text-lg px-8 py-3"
+          >
+            返回首页
+          </button>
+        </div>
       </Modal>
     </div>
   );

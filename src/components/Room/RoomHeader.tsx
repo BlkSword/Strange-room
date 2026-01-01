@@ -7,7 +7,14 @@
 import { RoomTTL } from '@/types/room';
 import { Clock, Users, Share2, Copy, Check, Crown, Shield, Trash2, Lock, Sparkles } from 'lucide-react';
 import { useState } from 'react';
-import { Button, Badge, Tooltip, Modal } from 'antd';
+import { Button, Tooltip, Modal } from 'antd';
+
+interface OnlineUser {
+  id: string;
+  nickname: string;
+  color: string;
+  isCreator?: boolean;
+}
 
 interface RoomHeaderProps {
   roomId: string;
@@ -19,6 +26,7 @@ interface RoomHeaderProps {
   inviteLink?: string;
   encryptionEnabled?: boolean;
   encryptionKeyString?: string;
+  onlineUsers?: OnlineUser[];
   onGenerateInvite?: () => void;
   onDestroyRoom?: () => void;
   onCopyEncryptionKey?: () => void;
@@ -34,6 +42,7 @@ export function RoomHeader({
   inviteLink,
   encryptionEnabled = false,
   encryptionKeyString,
+  onlineUsers = [],
   onGenerateInvite,
   onDestroyRoom,
   onCopyEncryptionKey,
@@ -122,7 +131,7 @@ export function RoomHeader({
       <div className="px-6 py-4">
         <div className="flex items-center justify-between">
           {/* 左侧：房间信息 */}
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-4 w-1/3">
             <div>
               <div className="flex items-center gap-3">
                 <h1 className="text-2xl font-bold text-sketch-black font-cave flex items-center gap-2">
@@ -131,11 +140,7 @@ export function RoomHeader({
                 </h1>
                 {isCreator && (
                   <Tooltip title="房间创建者">
-                    <Badge
-                      count={<Crown size={14} className="text-sketch-accent" />}
-                      showZero
-                      className="bg-sketch-light border-2 border-sketch-black"
-                    />
+                    <Crown size={18} className="text-sketch-accent" />
                   </Tooltip>
                 )}
               </div>
@@ -145,10 +150,55 @@ export function RoomHeader({
                     #{roomId}
                   </span>
                 </span>
-                <span className="flex items-center gap-1.5">
-                  <Users size={16} />
-                  {onlineCount} 人在线
-                </span>
+                {/* 在线用户头像 */}
+                <Tooltip
+                  title={
+                    <div className="max-w-xs">
+                      <div className="font-semibold mb-2 text-sm">在线用户 ({onlineUsers.length})</div>
+                      <div className="space-y-1">
+                        {onlineUsers.map((user) => (
+                          <div key={user.id} className="flex items-center gap-2 text-xs">
+                            <div
+                              className="w-5 h-5 rounded-full flex items-center justify-center text-white text-xs font-medium"
+                              style={{ backgroundColor: user.color }}
+                            >
+                              {user.nickname.charAt(0).toUpperCase()}
+                            </div>
+                            <span className="flex-1">{user.nickname}</span>
+                            {user.isCreator && <Crown size={10} className="text-sketch-accent" />}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  }
+                  color="white"
+                  overlayClassName="user-tooltip"
+                >
+                  <span className="flex items-center gap-1.5 cursor-help hover:text-sketch-black transition-colors">
+                    <Users size={16} />
+                    {onlineCount} 人在线
+                    {/* 显示最多3个头像 */}
+                    {onlineUsers.length > 0 && (
+                      <span className="flex -space-x-2 ml-1">
+                        {onlineUsers.slice(0, 3).map((user) => (
+                          <div
+                            key={user.id}
+                            className="w-6 h-6 rounded-full border-2 border-white flex items-center justify-center text-white text-xs font-medium"
+                            style={{ backgroundColor: user.color }}
+                            title={user.nickname}
+                          >
+                            {user.nickname.charAt(0).toUpperCase()}
+                          </div>
+                        ))}
+                        {onlineUsers.length > 3 && (
+                          <div className="w-6 h-6 rounded-full border-2 border-white bg-sketch-gray flex items-center justify-center text-white text-xs font-medium">
+                            +{onlineUsers.length - 3}
+                          </div>
+                        )}
+                      </span>
+                    )}
+                  </span>
+                </Tooltip>
                 {encryptionEnabled && (
                   <Tooltip title="端到端加密已启用，消息内容只有房间成员可以查看">
                     <span className="flex items-center gap-1.5 text-sketch-black bg-sketch-light px-3 py-1 rounded-sketch border-2 border-sketch-black">
@@ -162,31 +212,17 @@ export function RoomHeader({
           </div>
 
           {/* 中间：倒计时 */}
-          <div className="flex items-center gap-6">
-            <div className="text-center">
-              <div className={`flex items-center gap-2 text-3xl font-mono font-semibold font-cave ${
-                isUrgent ? 'text-red-500 animate-pulse' : isNearExpiry ? 'text-amber-600' : 'text-sketch-black'
-              }`}>
-                <Clock size={24} className={isUrgent ? 'animate-pulse' : ''} />
-                {formatTime(remainingTime)}
-              </div>
-              <div className="w-52 h-2 bg-sketch-light rounded-sketch mt-2 overflow-hidden border-2 border-sketch-black">
-                <div
-                  className={`h-full transition-all duration-1000 rounded-sketch ${
-                    isUrgent
-                      ? 'bg-red-500'
-                      : isNearExpiry
-                      ? 'bg-amber-500'
-                      : 'bg-sketch-accent'
-                  }`}
-                  style={{ width: `${getPercent()}%` }}
-                />
-              </div>
+          <div className="flex items-center justify-center flex-1">
+            <div className={`flex items-center gap-2 text-3xl font-mono font-semibold font-cave ${
+              isUrgent ? 'text-red-500 animate-pulse' : isNearExpiry ? 'text-amber-600' : 'text-sketch-black'
+            }`}>
+              <Clock size={24} className={isUrgent ? 'animate-pulse' : ''} />
+              {formatTime(remainingTime)}
             </div>
           </div>
 
           {/* 右侧：邀请按钮和销毁按钮 */}
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 w-1/3 justify-end">
             {encryptionEnabled && isCreator && encryptionKeyString && (
               <Button
                 onClick={handleCopyEncryptionKey}

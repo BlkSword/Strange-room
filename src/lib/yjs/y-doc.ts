@@ -187,9 +187,9 @@ export class YjsManager {
     this.provider.ws?.addEventListener('close', (event: CloseEvent) => {
       console.log('[Yjs] WebSocket 连接已关闭, code:', event.code, 'reason:', event.reason);
 
-      // 如果服务器明确表示房间不存在（1008 状态码），停止重连
-      if (event.code === 1008 && event.reason === 'room_not_found') {
-        console.warn('[Yjs] 房间不存在，停止重连');
+      // 如果服务器明确表示房间不存在或已销毁（1008 状态码），停止重连
+      if (event.code === 1008 && (event.reason === 'room_not_found' || event.reason === 'room_destroyed')) {
+        console.warn('[Yjs] 房间不存在或已销毁，停止重连');
         this.shouldReconnect = false;
         // 停止 WebsocketProvider 的自动重连
         if (this.provider) {
@@ -391,6 +391,11 @@ export class YjsManager {
    * 销毁 Yjs 实例
    */
   destroy() {
+    console.log('[Yjs] 正在销毁实例...');
+
+    // 停止重连
+    this.shouldReconnect = false;
+
     // 触发销毁回调
     this.destroyCallbacks.forEach(cb => cb());
 
@@ -401,13 +406,23 @@ export class YjsManager {
 
     // 断开 WebSocket 连接
     if (this.provider) {
+      // 先手动关闭 WebSocket 连接
+      if (this.provider.ws) {
+        try {
+          this.provider.ws.close(1000, 'Client destroying');
+        } catch (e) {
+          // Ignore
+        }
+      }
+      // 再销毁 provider
       this.provider.destroy();
+      this.provider = null;
     }
 
     // 销毁文档
     this.doc.destroy();
 
-    console.log('[Yjs] 实例已销毁');
+    console.log('[Yjs] 实例已销毁，WebSocket 已断开');
   }
 
   // ========== 端到端加密相关方法 ==========

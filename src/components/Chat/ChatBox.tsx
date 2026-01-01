@@ -5,8 +5,8 @@
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
-import { Send, Smile, Image as ImageIcon, Lock, Sparkles } from 'lucide-react';
-import { Button, Input, Avatar, message } from 'antd';
+import { Send, Smile, Image as ImageIcon, Lock, Sparkles, X } from 'lucide-react';
+import { Button, Input, Avatar, message, Dropdown } from 'antd';
 import { RoomMessage } from '@/types/room';
 
 interface ChatBoxProps {
@@ -17,10 +17,22 @@ interface ChatBoxProps {
   encryptionEnabled?: boolean;
 }
 
+// 常用表情列表
+const EMOJIS = [
+  '😀', '😃', '😄', '😁', '😅', '😂', '🤣', '😊',
+  '😇', '🙂', '😉', '😌', '😍', '🥰', '😘', '😗',
+  '😙', '😚', '😋', '😛', '😜', '🤪', '😝', '🤗',
+  '🤭', '🤔', '🤐', '😤', '😡', '👍', '👎', '👏',
+  '🙏', '💪', '❤️', '🔥', '✨', '🎉', '🎊', '💯',
+  '✅', '❌', '⚡', '🌟', '💫', '🚀', '💯', '👀',
+];
+
 export function ChatBox({ messages, currentUserId, onSendMessage, onlineUsers = [], encryptionEnabled = false }: ChatBoxProps) {
   const [input, setInput] = useState('');
   const [isSending, setIsSending] = useState(false);
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // 创建用户ID到用户名的映射
   const userNameMap = new Map(
@@ -64,6 +76,45 @@ export function ChatBox({ messages, currentUserId, onSendMessage, onlineUsers = 
       e.preventDefault();
       handleSend();
     }
+  };
+
+  // 插入表情
+  const insertEmoji = (emoji: string) => {
+    setInput((prev) => prev + emoji);
+    setShowEmojiPicker(false);
+  };
+
+  // 图片上传处理
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // 验证文件类型
+    if (!file.type.startsWith('image/')) {
+      message.error('请选择图片文件');
+      return;
+    }
+
+    // 验证文件大小 (最大 5MB)
+    if (file.size > 5 * 1024 * 1024) {
+      message.error('图片大小不能超过 5MB');
+      return;
+    }
+
+    try {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const base64 = event.target?.result as string;
+        onSendMessage(base64, 'image');
+      };
+      reader.readAsDataURL(file);
+    } catch (error) {
+      console.error('[ChatBox] 图片上传失败:', error);
+      message.error('图片上传失败，请重试');
+    }
+
+    // 清空 input 以便可以重复上传同一张图片
+    e.target.value = '';
   };
 
   // 格式化时间
@@ -148,20 +199,32 @@ export function ChatBox({ messages, currentUserId, onSendMessage, onlineUsers = 
                       <span className="text-sm text-sketch-gray mb-1 ml-1 font-cave">{displayName}</span>
                     )}
                     <div
-                      className={`px-5 py-3 rounded-sketch border-2 ${
+                      className={`rounded-sketch border-2 overflow-hidden ${
                         isCurrentUser
                           ? 'bg-sketch-background text-sketch-black border-sketch-black shadow-sketch'
                           : 'bg-sketch-light text-sketch-black border-sketch-black'
                       }`}
                     >
-                      <div className="flex items-start gap-2">
-                        <p className="text-base whitespace-pre-wrap break-words leading-relaxed flex-1 font-cave">
-                          {msg.content}
-                        </p>
-                        {encryptionEnabled && msg.type !== 'system' && (
-                          <Lock size={12} className={isCurrentUser ? 'text-sketch-light' : 'text-sketch-gray'} />
-                        )}
-                      </div>
+                      {/* 图片消息 */}
+                      {msg.type === 'image' ? (
+                        <img
+                          src={msg.content}
+                          alt="分享的图片"
+                          className="max-w-full max-h-64 object-contain"
+                        />
+                      ) : (
+                        /* 文本消息 */
+                        <div className="px-5 py-3">
+                          <div className="flex items-start gap-2">
+                            <p className="text-base whitespace-pre-wrap break-words leading-relaxed flex-1 font-cave">
+                              {msg.content}
+                            </p>
+                            {encryptionEnabled && msg.type !== 'system' && (
+                              <Lock size={12} className={isCurrentUser ? 'text-sketch-light' : 'text-sketch-gray'} />
+                            )}
+                          </div>
+                        </div>
+                      )}
                     </div>
                     <span className="text-xs text-sketch-gray mt-1 px-1 font-cave">{formatTime(msg.timestamp)}</span>
                   </div>
@@ -175,13 +238,56 @@ export function ChatBox({ messages, currentUserId, onSendMessage, onlineUsers = 
 
       {/* 输入框 */}
       <div className="p-4 border-t-2 border-sketch-black bg-sketch-card">
-        <div className="flex items-end gap-3">
-          <button className="p-3 text-sketch-gray hover:text-sketch-black hover:bg-sketch-light rounded-sketch transition-colors border-2 border-transparent hover:border-sketch-black">
+        {/* 表情选择器 */}
+        {showEmojiPicker && (
+          <div className="mb-3 p-3 bg-sketch-background border-2 border-sketch-black rounded-sketch shadow-sketch">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-sm font-cave text-sketch-black">选择表情</span>
+              <button
+                onClick={() => setShowEmojiPicker(false)}
+                className="p-1 text-sketch-gray hover:text-sketch-black transition-colors"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="grid grid-cols-8 gap-1">
+              {EMOJIS.map((emoji) => (
+                <button
+                  key={emoji}
+                  onClick={() => insertEmoji(emoji)}
+                  className="p-2 text-2xl hover:bg-sketch-light rounded transition-colors"
+                >
+                  {emoji}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+            className={`p-3 rounded-sketch transition-colors border-2 ${
+              showEmojiPicker
+                ? 'text-sketch-black bg-sketch-light border-sketch-black'
+                : 'text-sketch-gray hover:text-sketch-black hover:bg-sketch-light border-transparent hover:border-sketch-black'
+            }`}
+          >
             <Smile size={22} />
           </button>
-          <button className="p-3 text-sketch-gray hover:text-sketch-black hover:bg-sketch-light rounded-sketch transition-colors border-2 border-transparent hover:border-sketch-black">
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            className="p-3 text-sketch-gray hover:text-sketch-black hover:bg-sketch-light rounded-sketch transition-colors border-2 border-transparent hover:border-sketch-black"
+          >
             <ImageIcon size={22} />
           </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            onChange={handleImageUpload}
+            className="hidden"
+          />
           <div className="flex-1">
             <Input.TextArea
               value={input}

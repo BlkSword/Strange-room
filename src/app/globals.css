@@ -276,3 +276,26 @@ body {
 .ant-message-notice-content .ant-message-icon > .anticon {
   font-size: 18px !important;
 }
+
+/* 用户列表 Tooltip 样式 */
+.user-tooltip .ant-tooltip-inner {
+  background: var(--card-bg) !important;
+  border: 2px solid var(--sketch-black) !important;
+  border-radius: 4px !important;
+  box-shadow: 3px 3px 0 rgba(44, 44, 44, 0.15) !important;
+  color: var(--foreground) !important;
+}
+
+.user-tooltip .ant-tooltip-arrow-content {
+  background: var(--card-bg) !important;
+  border: 2px solid var(--sketch-black) !important;
+}
+
+/* 空白 Modal 样式 - 用于销毁房间等特殊场景 */
+.ant-modal-content.custom-empty-modal .ant-modal-body {
+  padding: 0 !important;
+}
+
+.ant-modal-content.custom-empty-modal .ant-modal-close {
+  display: none !important;
+}
