@@ -220,6 +220,8 @@ export default function RoomPage() {
 
           const room: Room = {
             ...parsed,
+            idleTimeout: parsed.idleTimeout || 15,
+            lastActiveAt: parsed.lastActiveAt || parsed.createdAt || Date.now(),
             peers: new Map(),
             destroyed: false,
           };
@@ -285,7 +287,7 @@ export default function RoomPage() {
         const roomData = JSON.parse(roomDataStr);
         if (roomData.createdAt && roomData.ttl) {
           console.log('[Room] 从 Yjs 同步房间创建时间:', new Date(roomData.createdAt).toISOString());
-          setCreatedAt(roomData.createdAt, roomData.ttl);
+          setCreatedAt(roomData.createdAt, roomData.ttl, roomData.idleTimeout || 15, roomData.lastActiveAt);
         }
       } catch (e) {
         console.error('[Room] 解析 Yjs roomData 失败:', e);
@@ -356,6 +358,8 @@ export default function RoomPage() {
       const amICreator = pendingRoomData.room.creatorPeerId === newPeerId;
       const room: Room = {
         ...pendingRoomData.room,
+        idleTimeout: pendingRoomData.room.idleTimeout || 15,
+        lastActiveAt: pendingRoomData.room.lastActiveAt || pendingRoomData.room.createdAt || Date.now(),
         peers: new Map(),
         destroyed: false,
       };

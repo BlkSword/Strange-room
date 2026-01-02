@@ -43,12 +43,12 @@ export interface DestroyRoomResponse {
 /**
  * 创建房间
  */
-export async function createRoom(ttl: number, creatorName: string): Promise<CreateRoomResponse> {
+export async function createRoom(ttl: number, creatorName: string, idleTimeout?: number): Promise<CreateRoomResponse> {
   try {
     const response = await fetch(`${SERVER_URL}/api/room/create`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ttl, creatorName }),
+      body: JSON.stringify({ ttl, creatorName, idleTimeout }),
     });
 
     const data = await response.json();

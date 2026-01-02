@@ -1,5 +1,6 @@
 /**
  * 协同代码编辑器组件 - 仅客户端渲染
+ * 使用本地 Monaco Editor 文件，无需网络请求
  */
 
 'use client';
@@ -9,10 +10,20 @@ import dynamic from 'next/dynamic';
 import { Download, Copy } from 'lucide-react';
 import { message } from 'antd';
 import type Monaco from '@monaco-editor/react';
+import { loader } from '@monaco-editor/react';
 
 // Monaco 类型定义
 type editor = Monaco.editor;
 type IStandaloneCodeEditor = editor.IStandaloneCodeEditor;
+
+// 配置使用本地 Monaco Editor 文件（仅在客户端）
+if (typeof window !== 'undefined') {
+  loader.config({
+    paths: {
+      vs: '/monaco-editor/min/vs'
+    }
+  });
+}
 
 // 动态导入Monaco Editor，禁用SSR
 const Editor = dynamic(() => import('@monaco-editor/react'), {
@@ -93,8 +104,8 @@ export function MonacoEditor({
     // 配置编辑器选项
     editor.updateOptions({
       fontSize: 14,
-      fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
-      fontLigatures: true,
+      fontFamily: "'Consolas', 'Monaco', 'Courier New', monospace",
+      fontLigatures: false,
       minimap: { enabled: true },
       scrollBeyondLastLine: false,
       automaticLayout: true,
@@ -193,15 +204,15 @@ export function MonacoEditor({
           <select
             value={language}
             onChange={(e) => setLanguage(e.target.value)}
-            className="bg-white/5 border border-white/10 rounded px-3 py-1.5 text-sm text-white focus:outline-none focus:border-blue-500/50"
+            className="bg-slate-800 border border-white/10 rounded px-3 py-1.5 text-sm text-white focus:outline-none focus:border-blue-500/50"
           >
-            <option value="javascript">JavaScript</option>
-            <option value="typescript">TypeScript</option>
-            <option value="python">Python</option>
-            <option value="html">HTML</option>
-            <option value="css">CSS</option>
-            <option value="json">JSON</option>
-            <option value="markdown">Markdown</option>
+            <option value="javascript" style={{ backgroundColor: '#1e293b', color: 'white' }}>JavaScript</option>
+            <option value="typescript" style={{ backgroundColor: '#1e293b', color: 'white' }}>TypeScript</option>
+            <option value="python" style={{ backgroundColor: '#1e293b', color: 'white' }}>Python</option>
+            <option value="html" style={{ backgroundColor: '#1e293b', color: 'white' }}>HTML</option>
+            <option value="css" style={{ backgroundColor: '#1e293b', color: 'white' }}>CSS</option>
+            <option value="json" style={{ backgroundColor: '#1e293b', color: 'white' }}>JSON</option>
+            <option value="markdown" style={{ backgroundColor: '#1e293b', color: 'white' }}>Markdown</option>
           </select>
 
           {/* 在线协作者 */}

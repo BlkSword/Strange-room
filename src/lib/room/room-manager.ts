@@ -3,11 +3,12 @@
  */
 
 import { nanoid } from 'nanoid';
-import { Room, RoomTTL, PeerInfo } from '@/types/room';
+import { Room, RoomTTL, IdleTimeout, PeerInfo } from '@/types/room';
 
 export interface CreateRoomOptions {
   name?: string;
   ttl: RoomTTL;
+  idleTimeout: IdleTimeout;
   creatorNickname: string;
   creatorColor: string;
 }
@@ -34,6 +35,8 @@ export class RoomManager {
       createdAt: now,
       ttl: options.ttl,
       expiresAt: now + ttlMs,
+      idleTimeout: options.idleTimeout,
+      lastActiveAt: now,
       creatorPeerId,
       peers: new Map([
         [
@@ -84,12 +87,14 @@ export class RoomManager {
    * 设置房间创建时间（用于从服务器或 Yjs 同步时间）
    * 当加入已有房间时，使用此方法校正倒计时
    */
-  setCreatedAt(createdAt: number, ttl: RoomTTL) {
+  setCreatedAt(createdAt: number, ttl: RoomTTL, idleTimeout: IdleTimeout, lastActiveAt?: number) {
     if (!this.room) return;
 
     this.room.createdAt = createdAt;
     this.room.expiresAt = createdAt + ttl * 60 * 60 * 1000;
-    console.log('[Room] 校正房间创建时间:', new Date(createdAt).toISOString(), '过期时间:', new Date(this.room.expiresAt).toISOString());
+    this.room.idleTimeout = idleTimeout;
+    this.room.lastActiveAt = lastActiveAt || createdAt;
+    console.log('[Room] 校正房间创建时间:', new Date(createdAt).toISOString(), '过期时间:', new Date(this.room.expiresAt).toISOString(), '空闲超时:', idleTimeout, '分钟');
   }
 
   /**
@@ -140,6 +145,26 @@ export class RoomManager {
 
       // 触发 tick 回调
       this.tickCallbacks.forEach(cb => cb(remaining));
+
+      // 检查是否有过在线用户，如果没有则检查空闲超时
+      const onlinePeers = this.getOnlinePeers();
+
+      // 更新最后活跃时间
+      if (onlinePeers.length > 0) {
+        this.room!.lastActiveAt = now;
+      }
+
+      // 检查空闲超时：没有在线用户且超过空闲超时时间
+      if (onlinePeers.length === 0) {
+        const idleMs = now - this.room!.lastActiveAt;
+        const idleTimeoutMs = this.room!.idleTimeout * 60 * 1000;
+
+        if (idleMs >= idleTimeoutMs) {
+          console.log('[Room] 房间空闲超时，自动销毁');
+          this.destroyRoom('expired');
+          return;
+        }
+      }
 
       // 检查是否过期
       if (remaining <= 0) {

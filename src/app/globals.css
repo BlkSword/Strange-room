@@ -22,18 +22,17 @@
   --color-sketch-accent-light: var(--sketch-accent-light);
   --color-sketch-border: var(--sketch-border);
   --color-card-bg: var(--card-bg);
-  --font-handwriting: 'Caveat', cursive;
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-handwriting: cursive, 'Comic Sans MS', 'Chalkboard SE', sans-serif;
+  --font-sans: system-ui, -apple-system, sans-serif;
+  --font-mono: 'Consolas', 'Monaco', 'Courier New', monospace;
 }
 
-/* 导入手写字体 */
-@import url('https://fonts.googleapis.com/css2?family=Caveat:wght@400;500;600;700&family=Permanent+Marker&display=swap');
+/* 使用本地字体，无需外部加载 */
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: 'Caveat', cursive, sans-serif;
+  font-family: cursive, 'Comic Sans MS', 'Chalkboard SE', sans-serif;
   position: relative;
   overflow-x: hidden;
   /* 轻微纸张纹理 */
@@ -64,7 +63,7 @@ body {
   border-radius: 4px;
   padding: 12px 24px;
   color: var(--background);
-  font-family: 'Caveat', cursive;
+  font-family: cursive, 'Comic Sans MS', 'Chalkboard SE', sans-serif;
   font-size: 1.1rem;
   font-weight: 600;
   cursor: pointer;
@@ -99,7 +98,7 @@ body {
   border-radius: 4px;
   padding: 12px 16px;
   color: var(--foreground);
-  font-family: 'Caveat', cursive;
+  font-family: cursive, 'Comic Sans MS', 'Chalkboard SE', sans-serif;
   font-size: 1rem;
   transition: all 0.2s ease;
 }
@@ -118,7 +117,7 @@ body {
 
 /* 简约标题 */
 .hand-drawn-title {
-  font-family: 'Permanent Marker', cursive;
+  font-family: 'Impact', 'Arial Black', sans-serif;
   color: var(--sketch-black);
 }
 
@@ -157,7 +156,7 @@ body {
 
 .ant-modal-title {
   color: var(--foreground) !important;
-  font-family: 'Caveat', cursive !important;
+  font-family: cursive, 'Comic Sans MS', 'Chalkboard SE', sans-serif !important;
   font-size: 1.25rem !important;
   font-weight: 600 !important;
 }
@@ -178,7 +177,7 @@ body {
   background: var(--sketch-black) !important;
   border: 2.5px solid var(--sketch-black) !important;
   border-radius: 4px !important;
-  font-family: 'Caveat', cursive !important;
+  font-family: cursive, 'Comic Sans MS', 'Chalkboard SE', sans-serif !important;
   box-shadow: 3px 3px 0 rgba(44, 44, 44, 0.2) !important;
 }
 
@@ -195,7 +194,7 @@ body {
   border: 2px solid var(--sketch-gray) !important;
   border-radius: 4px !important;
   color: var(--foreground) !important;
-  font-family: 'Caveat', cursive !important;
+  font-family: cursive, 'Comic Sans MS', 'Chalkboard SE', sans-serif !important;
   font-size: 1rem !important;
 }
 
@@ -216,7 +215,7 @@ body {
 .ant-radio-button-wrapper {
   border: 2px solid var(--sketch-gray) !important;
   border-radius: 4px !important;
-  font-family: 'Caveat', cursive !important;
+  font-family: cursive, 'Comic Sans MS', 'Chalkboard SE', sans-serif !important;
   transition: all 0.2s ease !important;
 }
 
@@ -253,7 +252,7 @@ body {
   border-radius: 4px !important;
   box-shadow: 3px 3px 0 rgba(44, 44, 44, 0.15) !important;
   padding: 12px 20px !important;
-  font-family: 'Caveat', cursive !important;
+  font-family: cursive, 'Comic Sans MS', 'Chalkboard SE', sans-serif !important;
   font-size: 1rem !important;
 }
 

@@ -4,7 +4,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { RoomManager } from '@/lib/room/room-manager';
-import { Room, RoomTTL, PeerInfo } from '@/types/room';
+import { Room, RoomTTL, IdleTimeout, PeerInfo } from '@/types/room';
 import { destroyRoom as destroyRoomApi } from '@/lib/server/api';
 
 const USER_COLORS = [
@@ -60,13 +60,14 @@ export function useRoom(options?: UseRoomOptions) {
   }, []);
 
   // 创建房间
-  const createRoom = useCallback((ttl: RoomTTL, nickname: string) => {
+  const createRoom = useCallback((ttl: RoomTTL, idleTimeout: IdleTimeout, nickname: string) => {
     const manager = roomManagerRef.current;
     if (!manager) return null;
 
     const color = USER_COLORS[Math.floor(Math.random() * USER_COLORS.length)];
     const newRoom = manager.createRoom({
       ttl,
+      idleTimeout,
       creatorNickname: nickname,
       creatorColor: color,
     });
@@ -217,10 +218,10 @@ export function useRoom(options?: UseRoomOptions) {
     destroyRoom,
     kickPeer,
     updateCursor,
-    setCreatedAt: (createdAt: number, ttl: RoomTTL) => {
+    setCreatedAt: (createdAt: number, ttl: RoomTTL, idleTimeout: IdleTimeout, lastActiveAt?: number) => {
       const manager = roomManagerRef.current;
       if (!manager) return;
-      manager.setCreatedAt(createdAt, ttl);
+      manager.setCreatedAt(createdAt, ttl, idleTimeout, lastActiveAt);
       setRemainingTime(manager.getRemainingTime());
     },
 

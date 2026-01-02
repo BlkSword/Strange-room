@@ -2,7 +2,7 @@
 
 import React, { useState } from "react";
 import Image from "next/image";
-import { Button, Modal, Input, Radio, Space, message, Switch } from "antd";
+import { Button, Modal, Input, Radio, Space, message } from "antd";
 import {
   Rocket,
   Plus,
@@ -11,10 +11,10 @@ import {
   ArrowRight,
   Lock,
   Github,
-  Info
+  UserX
 } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { RoomTTL } from "@/types/room";
+import { RoomTTL, type IdleTimeout } from "@/types/room";
 import { createRoom as apiCreateRoom, generateToken } from "@/lib/server/api";
 import { generateStableIdFromNickname } from "@/lib/utils/hash";
 import Link from "next/link";
@@ -28,6 +28,7 @@ export default function Home() {
   const [joinRoomId, setJoinRoomId] = useState('');
   const [joinNickname, setJoinNickname] = useState('');
   const [ttl, setTtl] = useState<RoomTTL>(24);
+  const [idleTimeout, setIdleTimeout] = useState<IdleTimeout>(15);
   const [isCreating, setIsCreating] = useState(false);
   const [isJoining, setIsJoining] = useState(false);
   const [createDisabled, setCreateDisabled] = useState(false);
@@ -55,7 +56,7 @@ export default function Home() {
     const MIN_LOADING_TIME = 800;
 
     try {
-      const createResult = await apiCreateRoom(ttl, nickname);
+      const createResult = await apiCreateRoom(ttl, nickname, idleTimeout);
 
       if (!createResult.success || !createResult.roomId) {
         message.destroy();
@@ -84,8 +85,10 @@ export default function Home() {
         id: roomId,
         name: roomName || `房间 ${roomId}`,
         ttl,
+        idleTimeout,
         createdAt: now,
         expiresAt: createResult.expiresAt || now + ttl * 60 * 60 * 1000,
+        lastActiveAt: now,
         creatorPeerId,
         peers: {},
         destroyed: false,
@@ -391,6 +394,39 @@ export default function Home() {
             <p className="text-sm text-sketch-gray mt-3 flex items-center gap-2 font-cave">
               <Clock size={16} />
               有效期结束后，房间将自动销毁，所有数据将被永久删除
+            </p>
+          </div>
+
+          <div>
+            <label className="block text-base font-cave text-sketch-black mb-3">空闲超时</label>
+            <Radio.Group
+              value={idleTimeout}
+              onChange={(e) => setIdleTimeout(e.target.value)}
+              className="w-full"
+            >
+              <div className="grid grid-cols-4 gap-3">
+                {[
+                  { value: 5, label: '5 分钟' },
+                  { value: 15, label: '15 分钟' },
+                  { value: 30, label: '30 分钟' },
+                  { value: 60, label: '1 小时' }
+                ].map((option) => (
+                  <Radio.Button
+                    key={option.value}
+                    value={option.value}
+                    className={`w-full text-center py-3 rounded-sketch border-2 font-cave ${idleTimeout === option.value
+                      ? 'bg-sketch-black border-sketch-black text-sketch-background'
+                      : 'border-sketch-gray hover:border-sketch-black bg-sketch-card'
+                      }`}
+                  >
+                    {option.label}
+                  </Radio.Button>
+                ))}
+              </div>
+            </Radio.Group>
+            <p className="text-sm text-sketch-gray mt-3 flex items-center gap-2 font-cave">
+              <UserX size={16} />
+              当房间内没有任何在线用户超过此时间，房间将自动销毁
             </p>
           </div>
         </Space>

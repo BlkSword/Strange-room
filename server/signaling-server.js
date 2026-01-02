@@ -16,7 +16,7 @@ const TOKEN_EXPIRY = 30 * 24 * 60 * 60 * 1000; // 30天
 const ROOM_EXPIRY = 48 * 60 * 60 * 1000; // 48小时
 
 // ========== 数据存储 ==========
-const rooms = new Map(); // roomId -> { createdAt, expiresAt, creator, destroyed }
+const rooms = new Map(); // roomId -> { createdAt, expiresAt, idleTimeout, lastActiveAt, creator, destroyed }
 const roomClients = new Map(); // roomId -> Set<WebSocket>
 const rateLimits = new Map(); // IP -> { count, resetTime }
 
@@ -150,16 +150,75 @@ function validateToken(token) {
   }
 }
 
-// 清理过期房间
+// 清理过期房间和空闲超时房间
 function cleanupExpiredRooms() {
   const now = Date.now();
   for (const [roomId, room] of rooms.entries()) {
+    // 检查是否过期
     if (now > room.expiresAt) {
       console.log(`[Server] 清理过期房间: ${roomId}`);
-      rooms.delete(roomId);
-      roomClients.delete(roomId);
+      destroyRoom(roomId);
+      continue;
+    }
+
+    // 检查空闲超时
+    const clients = roomClients.get(roomId);
+    const hasActiveClients = clients && clients.size > 0;
+
+    // 更新最后活跃时间
+    if (hasActiveClients) {
+      room.lastActiveAt = now;
+    } else {
+      // 没有活跃客户端，检查是否超时
+      const idleMs = now - room.lastActiveAt;
+      const idleTimeoutMs = (room.idleTimeout || 15) * 60 * 1000; // 默认15分钟
+
+      if (idleMs >= idleTimeoutMs) {
+        console.log(`[Server] 房间空闲超时，自动销毁: ${roomId}, 空闲时间: ${Math.floor(idleMs / 1000)}秒`);
+        destroyRoom(roomId);
+      }
     }
   }
+}
+
+// 销毁房间的辅助函数
+function destroyRoom(roomId) {
+  const room = rooms.get(roomId);
+  if (!room || room.destroyed) return;
+
+  room.destroyed = true;
+
+  // 关闭所有 WebSocket 连接
+  const clients = roomClients.get(roomId);
+  if (clients) {
+    clients.forEach((ws) => {
+      try {
+        ws.close(1000, 'Room destroyed');
+      } catch (e) {
+        // Ignore close errors
+      }
+    });
+    roomClients.delete(roomId);
+  }
+
+  // 关闭 Yjs WebSocket 连接
+  const yjsClients = yjsRooms.get(roomId);
+  if (yjsClients) {
+    yjsClients.forEach((ws) => {
+      try {
+        ws.close(1000, 'Room destroyed');
+      } catch (e) {
+        // Ignore close errors
+      }
+    });
+    yjsRooms.delete(roomId);
+  }
+
+  // 延迟删除房间数据
+  setTimeout(() => {
+    rooms.delete(roomId);
+    console.log(`[Server] 房间数据已删除: ${roomId}`);
+  }, 5000);
 }
 
 // 定期清理（每分钟）
@@ -206,7 +265,7 @@ const server = http.createServer((req, res) => {
     req.on('data', chunk => body += chunk);
     req.on('end', () => {
       try {
-        const { ttl, creatorName } = JSON.parse(body);
+        const { ttl, creatorName, idleTimeout } = JSON.parse(body);
         const roomId = generateRoomId();
         const now = Date.now();
         const expiresAt = now + (ttl * 60 * 60 * 1000);
@@ -215,6 +274,8 @@ const server = http.createServer((req, res) => {
         rooms.set(roomId, {
           createdAt: now,
           expiresAt,
+          idleTimeout: idleTimeout || 15, // 默认15分钟
+          lastActiveAt: now,
           creator: creatorName || '未知',
           destroyed: false,
         });
@@ -222,13 +283,14 @@ const server = http.createServer((req, res) => {
         // 初始化房间客户端集合
         roomClients.set(roomId, new Set());
 
-        console.log(`[Server] 创建房间: ${roomId}, 过期时间: ${new Date(expiresAt).toISOString()}`);
+        console.log(`[Server] 创建房间: ${roomId}, 过期时间: ${new Date(expiresAt).toISOString()}, 空闲超时: ${idleTimeout || 15}分钟`);
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           success: true,
           roomId,
           expiresAt,
+          idleTimeout: idleTimeout || 15,
         }));
       } catch (error) {
         console.error('[Server] 创建房间错误:', error);
@@ -261,6 +323,8 @@ const server = http.createServer((req, res) => {
       room: room ? {
         createdAt: room.createdAt,
         expiresAt: room.expiresAt,
+        idleTimeout: room.idleTimeout,
+        lastActiveAt: room.lastActiveAt,
         creator: room.creator,
       } : null,
     }));
@@ -350,40 +414,8 @@ const server = http.createServer((req, res) => {
           return;
         }
 
-        // 标记房间为已销毁
-        room.destroyed = true;
-
-        // 关闭所有 WebSocket 连接
-        const clients = roomClients.get(roomId);
-        if (clients) {
-          clients.forEach((ws) => {
-            try {
-              ws.close(1000, 'Room destroyed');
-            } catch (e) {
-              // Ignore close errors
-            }
-          });
-          roomClients.delete(roomId);
-        }
-
-        // 关闭 Yjs WebSocket 连接
-        const yjsClients = getYjsRoomClients(roomId);
-        if (yjsClients) {
-          yjsClients.forEach((ws) => {
-            try {
-              ws.close(1000, 'Room destroyed');
-            } catch (e) {
-              // Ignore close errors
-            }
-          });
-          yjsRooms.delete(roomId);
-        }
-
-        // 延迟删除房间数据（给客户端时间收到销毁消息）
-        setTimeout(() => {
-          rooms.delete(roomId);
-          console.log(`[Server] 房间数据已删除: ${roomId}`);
-        }, 5000);
+        // 使用统一的销毁函数
+        destroyRoom(roomId);
 
         console.log(`[Server] 销毁房间: ${roomId}`);
 

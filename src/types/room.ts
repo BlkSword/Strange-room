@@ -3,6 +3,7 @@
  */
 
 export type RoomTTL = 1 | 6 | 24 | 48 | 168; // 小时: 1h, 6h, 24h, 48h, 7天
+export type IdleTimeout = 5 | 15 | 30 | 60; // 分钟: 5分钟, 15分钟, 30分钟, 1小时
 
 export interface Room {
   id: string;
@@ -10,6 +11,8 @@ export interface Room {
   createdAt: number;
   ttl: RoomTTL;
   expiresAt: number;
+  idleTimeout: IdleTimeout; // 空闲超时时间（分钟）
+  lastActiveAt: number; // 最后活跃时间（有用户在线的时间）
   creatorPeerId: string;
   peers: Map<string, PeerInfo>;
   destroyed: boolean;
