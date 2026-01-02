@@ -5,9 +5,9 @@
 'use client';
 
 import { RoomTTL } from '@/types/room';
-import { Clock, Users, Share2, Copy, Check, Crown, Shield, Trash2, Lock, Sparkles } from 'lucide-react';
+import { Clock, Users, Share2, Copy, Check, Crown, Shield, Trash2, Lock, Sparkles, Download } from 'lucide-react';
 import { useState } from 'react';
-import { Button, Tooltip, Modal } from 'antd';
+import { Button, Tooltip, Modal, Input } from 'antd';
 
 interface OnlineUser {
   id: string;
@@ -30,6 +30,8 @@ interface RoomHeaderProps {
   onGenerateInvite?: () => void;
   onDestroyRoom?: () => void;
   onCopyEncryptionKey?: () => void;
+  onExportRoom?: (password?: string) => Promise<boolean>;
+  isExporting?: boolean;
 }
 
 export function RoomHeader({
@@ -46,10 +48,14 @@ export function RoomHeader({
   onGenerateInvite,
   onDestroyRoom,
   onCopyEncryptionKey,
+  onExportRoom,
+  isExporting = false,
 }: RoomHeaderProps) {
   const [copied, setCopied] = useState(false);
   const [isCopying, setIsCopying] = useState(false);
   const [destroyModalOpen, setDestroyModalOpen] = useState(false);
+  const [exportModalOpen, setExportModalOpen] = useState(false);
+  const [exportPassword, setExportPassword] = useState('');
 
   // 销毁房间确认
   const handleDestroyRoom = () => {
@@ -124,6 +130,28 @@ export function RoomHeader({
       setCopied(false);
       setIsCopying(false);
     }, 2000);
+  };
+
+  // 打开导出弹窗
+  const handleExportClick = () => {
+    setExportPassword('');
+    setExportModalOpen(true);
+  };
+
+  // 确认导出
+  const handleExportConfirm = async () => {
+    const password = exportPassword.trim() || undefined;
+    const success = await onExportRoom?.(password);
+    if (success) {
+      setExportModalOpen(false);
+      setExportPassword('');
+    }
+  };
+
+  // 取消导出
+  const handleExportCancel = () => {
+    setExportModalOpen(false);
+    setExportPassword('');
   };
 
   return (
@@ -223,6 +251,16 @@ export function RoomHeader({
 
           {/* 右侧：邀请按钮和销毁按钮 */}
           <div className="flex items-center gap-3 w-1/3 justify-end">
+            {/* 导出按钮 */}
+            <Button
+              onClick={handleExportClick}
+              disabled={isExporting}
+              icon={<Download size={18} />}
+              className="hand-drawn-btn font-cave"
+            >
+              {isExporting ? '导出中...' : '导出'}
+            </Button>
+
             {encryptionEnabled && isCreator && encryptionKeyString && (
               <Button
                 onClick={handleCopyEncryptionKey}
@@ -280,6 +318,41 @@ export function RoomHeader({
         maskClosable
       >
         <p className="text-sketch-gray font-cave">此操作将永久销毁房间，所有数据将被删除且无法恢复。是否继续？</p>
+      </Modal>
+
+      {/* 导出房间数据弹窗 */}
+      <Modal
+        title={
+          <span className="text-sketch-black font-cave text-xl">导出房间数据</span>
+        }
+        open={exportModalOpen}
+        onOk={handleExportConfirm}
+        onCancel={handleExportCancel}
+        okText="导出"
+        cancelText="取消"
+        confirmLoading={isExporting}
+        centered
+        maskClosable
+      >
+        <div className="py-2">
+          <p className="text-sketch-gray font-cave mb-4">
+            将导出房间的所有数据，包括聊天记录、代码、白板内容等。
+          </p>
+          <div className="mb-4">
+            <label className="block text-sm font-medium text-sketch-gray font-cave mb-2">
+              设置密码（可选）
+            </label>
+            <Input.Password
+              placeholder="留空则不加密"
+              value={exportPassword}
+              onChange={(e) => setExportPassword(e.target.value)}
+              className="font-cave"
+            />
+            <p className="text-xs text-gray-500 mt-1 font-cave">
+              设置密码后，导出的文件将被加密，需要密码才能导入
+            </p>
+          </div>
+        </div>
       </Modal>
     </div>
   );

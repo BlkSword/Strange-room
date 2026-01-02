@@ -7,6 +7,7 @@
 
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
+import * as Y from 'yjs';
 import { RoomHeader } from '@/components/Room/RoomHeader';
 import { RoomLayout } from '@/components/Room/RoomLayout';
 import { ChatBox } from '@/components/Chat/ChatBox';
@@ -14,6 +15,7 @@ import { Canvas } from '@/components/Whiteboard/Canvas';
 import { MonacoEditor } from '@/components/Editor/MonacoEditor';
 import { useRoom } from '@/hooks/useRoom';
 import { useYjs } from '@/hooks/useYjs';
+import { useRoomExport } from '@/hooks/useRoomExport';
 import { generateToken } from '@/lib/server/api';
 import { Room } from '@/types/room';
 import { message, Modal } from 'antd';
@@ -123,6 +125,13 @@ export default function RoomPage() {
     token, // 传递 token 给 Yjs
     encryptionKey, // 传递加密密钥
     encryptionEnabled: !!encryptionKey, // 启用加密
+  });
+
+  // 房间导出 Hook
+  const { exportRoom, isExporting } = useRoomExport({
+    yjs,
+    room,
+    roomId,
   });
 
   // 监听连接状态变化，显示消息提示
@@ -333,6 +342,49 @@ export default function RoomPage() {
 
     initializeEncryption();
   }, [encryptionEnabledState, yjs, hasEncryption, nickname, isCreator, room]);
+
+  // 处理导入数据还原
+  useEffect(() => {
+    if (!yjs || !room) return;
+
+    // 检查 URL 中是否有 import 参数
+    const urlParams = new URLSearchParams(window.location.search);
+    const shouldImport = urlParams.get('import') === 'true';
+
+    if (!shouldImport) return;
+
+    // 从 sessionStorage 读取导入数据
+    const importDataStr = sessionStorage.getItem(`import-data-${roomId}`);
+    if (!importDataStr) {
+      console.warn('[Room] 导入数据不存在');
+      return;
+    }
+
+    try {
+      const importData = JSON.parse(importDataStr);
+      console.log('[Room] 开始还原导入数据...');
+
+      // 应用 Yjs 状态更新
+      if (importData.stateAsUpdate) {
+        // 将 Base64 转换回 Uint8Array
+        const binaryString = atob(importData.stateAsUpdate);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+          bytes[i] = binaryString.charCodeAt(i);
+        }
+        Y.applyUpdate(yjs.doc, bytes);
+        console.log('[Room] Yjs 状态已还原');
+      }
+
+      // 清除 sessionStorage 中的导入数据
+      sessionStorage.removeItem(`import-data-${roomId}`);
+
+      message.success('房间数据已成功还原');
+    } catch (error) {
+      console.error('[Room] 还原导入数据失败:', error);
+      message.error('还原数据失败：' + (error as Error).message);
+    }
+  }, [yjs, room, roomId]);
 
   // 显示昵称输入弹窗
   const showNicknameModal = useCallback((existingRoom: any, isCreator: boolean = false) => {
@@ -587,6 +639,8 @@ export default function RoomPage() {
         onGenerateInvite={handleGenerateInvite}
         onDestroyRoom={handleDestroyRoom}
         onCopyEncryptionKey={handleCopyEncryptionKey}
+        onExportRoom={exportRoom}
+        isExporting={isExporting}
       />
 
       {/* 房间布局 */}

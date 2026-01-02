@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useRef } from "react";
 import Image from "next/image";
 import { Button, Modal, Input, Radio, Space, message } from "antd";
 import {
@@ -11,28 +11,36 @@ import {
   ArrowRight,
   Lock,
   Github,
-  UserX
+  UserX,
+  Upload
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { RoomTTL, type IdleTimeout } from "@/types/room";
 import { createRoom as apiCreateRoom, generateToken } from "@/lib/server/api";
 import { generateStableIdFromNickname } from "@/lib/utils/hash";
 import Link from "next/link";
+import { readExportFile, validateExportData, getExportInfo, decryptExportData } from "@/lib/export";
 
 export default function Home() {
   const router = useRouter();
   const [createModalVisible, setCreateModalVisible] = useState(false);
   const [joinModalVisible, setJoinModalVisible] = useState(false);
+  const [importModalVisible, setImportModalVisible] = useState(false);
   const [roomName, setRoomName] = useState('');
   const [nickname, setNickname] = useState('');
   const [joinRoomId, setJoinRoomId] = useState('');
   const [joinNickname, setJoinNickname] = useState('');
+  const [importNickname, setImportNickname] = useState('');
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importPassword, setImportPassword] = useState('');
   const [ttl, setTtl] = useState<RoomTTL>(24);
   const [idleTimeout, setIdleTimeout] = useState<IdleTimeout>(15);
   const [isCreating, setIsCreating] = useState(false);
   const [isJoining, setIsJoining] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
   const [createDisabled, setCreateDisabled] = useState(false);
   const [joinDisabled, setJoinDisabled] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // 创建房间
   const handleCreateRoom = async () => {
@@ -177,6 +185,152 @@ export default function Home() {
     }
   };
 
+  // 处理文件选择
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      setImportFile(file);
+    }
+  };
+
+  // 导入房间数据
+  const handleImportRoom = async () => {
+    // 验证昵称
+    if (!importNickname.trim()) {
+      message.warning('请输入您的昵称');
+      return;
+    }
+
+    if (!importFile) {
+      message.warning('请选择导出文件');
+      return;
+    }
+
+    setIsImporting(true);
+    message.loading('正在处理导入数据...', 0);
+
+    try {
+      // 读取文件
+      const data = await readExportFile(importFile);
+
+      // 验证数据格式
+      if (!validateExportData(data)) {
+        message.destroy();
+        message.error('无效的导出文件格式');
+        setIsImporting(false);
+        return;
+      }
+
+      // 获取文件信息
+      const info = getExportInfo(data);
+
+      // 如果是加密文件，验证密码
+      let roomData = data;
+      if (info.encrypted) {
+        if (!importPassword.trim()) {
+          message.destroy();
+          message.warning('请输入解密密码');
+          setIsImporting(false);
+          return;
+        }
+        try {
+          roomData = decryptExportData(data, importPassword);
+        } catch {
+          message.destroy();
+          message.error('密码错误或文件已损坏');
+          setIsImporting(false);
+          return;
+        }
+      }
+
+      message.destroy();
+      message.success('数据解析成功，正在创建房间...');
+
+      // 创建新房间
+      const createResult = await apiCreateRoom(24, importNickname, 15);
+
+      if (!createResult.success || !createResult.roomId) {
+        message.error(createResult.error || '创建房间失败');
+        setIsImporting(false);
+        return;
+      }
+
+      const roomId = createResult.roomId;
+      const tokenResult = await generateToken(roomId);
+
+      if (!tokenResult.success || !tokenResult.token) {
+        message.error('生成访问令牌失败');
+        setIsImporting(false);
+        return;
+      }
+
+      const token = tokenResult.token;
+      const creatorPeerId = generateStableIdFromNickname(importNickname, roomId);
+
+      const now = Date.now();
+
+      // 使用导入的房间数据
+      const importRoomData = roomData as any;
+
+      const newRoomData = {
+        id: roomId,
+        name: importRoomData.roomName || `房间 ${roomId}`,
+        ttl: importRoomData.metadata.ttl || 24,
+        idleTimeout: importRoomData.metadata.idleTimeout || 15,
+        createdAt: now,
+        expiresAt: now + (importRoomData.metadata.ttl || 24) * 60 * 60 * 1000,
+        lastActiveAt: now,
+        creatorPeerId,
+        peers: {},
+        destroyed: false,
+        creator: importNickname,
+      };
+
+      // 保存房间数据到 localStorage
+      localStorage.setItem(`room-data-${roomId}`, JSON.stringify(newRoomData));
+      localStorage.setItem(`user-nickname-${roomId}`, importNickname);
+      localStorage.setItem(`room-token-${roomId}`, token);
+
+      // 如果有加密密钥，也保存
+      if (importRoomData.userData?.encryptionKey) {
+        localStorage.setItem(`room-encryption-key-${roomId}`, importRoomData.userData.encryptionKey);
+      }
+      if (importRoomData.userData?.encryptionEnabled) {
+        localStorage.setItem(`room-encryption-enabled-${roomId}`, 'true');
+      }
+
+      // 保存导入数据到 sessionStorage，在房间页面还原
+      sessionStorage.setItem(`import-data-${roomId}`, JSON.stringify(importRoomData.yjsData));
+
+      // 跳转到房间页面
+      await new Promise(resolve => setTimeout(resolve, 500));
+      router.push(`/room/${roomId}?token=${token}&import=true`);
+    } catch (error) {
+      console.error('[Home] 导入房间失败:', error);
+      message.destroy();
+      message.error('导入失败：' + (error as Error).message);
+      setIsImporting(false);
+    }
+  };
+
+  // 打开导入弹窗
+  const handleOpenImportModal = () => {
+    setImportNickname('');
+    setImportFile(null);
+    setImportPassword('');
+    setImportModalVisible(true);
+  };
+
+  // 关闭导入弹窗
+  const handleCloseImportModal = () => {
+    if (!isImporting) {
+      setImportModalVisible(false);
+      setImportNickname('');
+      setImportFile(null);
+      setImportPassword('');
+    }
+  };
+
   return (
     <div className="min-h-screen bg-sketch-background flex flex-col">
       {/* 顶部导航 */}
@@ -216,7 +370,7 @@ export default function Home() {
           </div>
 
           {/* 功能卡片 */}
-          <div className="grid md:grid-cols-2 gap-8">
+          <div className="grid md:grid-cols-3 gap-6">
             {/* 创建房间卡片 */}
             <div className="mystic-card hand-drawn-border hover:translate-y-[-4px] transition-transform duration-200">
               <div className="text-center">
@@ -225,20 +379,16 @@ export default function Home() {
                 </div>
                 <h2 className="text-2xl font-semibold text-sketch-black mb-3 font-cave">创建房间</h2>
                 <p className="text-sketch-gray mb-6 font-cave">
-                  创建一个新的协作房间，成为房间创建者
+                  创建一个新的协作房间
                 </p>
                 <div className="space-y-3 mb-6 text-left">
                   <div className="flex items-center gap-2 text-sm text-sketch-gray font-cave">
                     <Clock size={16} className="text-sketch-accent" />
-                    <span>自定义有效期 (1-48小时)</span>
+                    <span>自定义有效期</span>
                   </div>
                   <div className="flex items-center gap-2 text-sm text-sketch-gray font-cave">
                     <Lock size={16} className="text-sketch-accent" />
                     <span>可选端到端加密</span>
-                  </div>
-                  <div className="flex items-center gap-2 text-sm text-sketch-gray font-cave">
-                    <Plus size={16} className="text-sketch-accent" />
-                    <span>可随时销毁房间</span>
                   </div>
                 </div>
                 <Button
@@ -248,7 +398,7 @@ export default function Home() {
                   onClick={() => setCreateModalVisible(true)}
                   className="hand-drawn-btn text-lg px-8 w-full"
                 >
-                  创建新房间
+                  创建
                 </Button>
               </div>
             </div>
@@ -261,7 +411,7 @@ export default function Home() {
                 </div>
                 <h2 className="text-2xl font-semibold text-sketch-black mb-3 font-cave">加入房间</h2>
                 <p className="text-sketch-gray mb-6 font-cave">
-                  通过房间ID加入现有房间，与他人协作
+                  通过房间ID加入现有房间
                 </p>
                 <div className="space-y-3 mb-6 text-left">
                   <div className="flex items-center gap-2 text-sm text-sketch-gray font-cave">
@@ -272,10 +422,6 @@ export default function Home() {
                     <Lock size={16} className="text-sketch-accent" />
                     <span>支持加密房间</span>
                   </div>
-                  <div className="flex items-center gap-2 text-sm text-sketch-gray font-cave">
-                    <Plus size={16} className="text-sketch-accent" />
-                    <span>实时同步数据</span>
-                  </div>
                 </div>
                 <Button
                   type="primary"
@@ -284,7 +430,39 @@ export default function Home() {
                   onClick={() => setJoinModalVisible(true)}
                   className="hand-drawn-btn text-lg px-8 w-full"
                 >
-                  加入现有房间
+                  加入
+                </Button>
+              </div>
+            </div>
+
+            {/* 导入房间卡片 */}
+            <div className="mystic-card hand-drawn-border hover:translate-y-[-4px] transition-transform duration-200">
+              <div className="text-center">
+                <div className="w-16 h-16 rounded-sketch bg-sketch-light flex items-center justify-center mx-auto mb-4 border-2 border-sketch-black">
+                  <Upload size={32} className="text-sketch-black" />
+                </div>
+                <h2 className="text-2xl font-semibold text-sketch-black mb-3 font-cave">导入数据</h2>
+                <p className="text-sketch-gray mb-6 font-cave">
+                  从导出文件恢复房间数据
+                </p>
+                <div className="space-y-3 mb-6 text-left">
+                  <div className="flex items-center gap-2 text-sm text-sketch-gray font-cave">
+                    <Upload size={16} className="text-sketch-accent" />
+                    <span>完整的房间数据还原</span>
+                  </div>
+                  <div className="flex items-center gap-2 text-sm text-sketch-gray font-cave">
+                    <Lock size={16} className="text-sketch-accent" />
+                    <span>支持加密文件导入</span>
+                  </div>
+                </div>
+                <Button
+                  type="primary"
+                  size="large"
+                  icon={<Upload size={20} />}
+                  onClick={handleOpenImportModal}
+                  className="hand-drawn-btn text-lg px-8 w-full"
+                >
+                  导入
                 </Button>
               </div>
             </div>
@@ -484,6 +662,75 @@ export default function Home() {
             <div className="text-sm text-sketch-gray font-cave">
               <p className="font-medium mb-1 text-sketch-black">安全提示</p>
               <p>请确保从可信来源获取房间ID。加入房间后，你将能够看到房间内的所有内容。</p>
+            </div>
+          </div>
+        </Space>
+      </Modal>
+
+      {/* 导入房间数据弹窗 */}
+      <Modal
+        title={
+          <div className="flex items-center gap-3">
+            <div className="w-12 h-12 rounded-sketch bg-sketch-light flex items-center justify-center border-2 border-sketch-black">
+              <Upload size={24} className="text-sketch-black" />
+            </div>
+            <span className="text-xl font-semibold text-sketch-black font-cave">导入房间数据</span>
+          </div>
+        }
+        open={importModalVisible}
+        onOk={handleImportRoom}
+        onCancel={handleCloseImportModal}
+        okText={<span className="flex items-center gap-2 font-cave">{isImporting ? '导入中...' : '导入数据'} {!isImporting && <ArrowRight size={16} />}</span>}
+        cancelText="取消"
+        width={500}
+        styles={{ body: { padding: '24px' } }}
+        confirmLoading={isImporting}
+        okButtonProps={{ disabled: !importFile }}
+        maskClosable={!isImporting}
+        closable={!isImporting}
+      >
+        <Space direction="vertical" size="large" className="w-full">
+          <div>
+            <label className="block text-base font-cave text-sketch-black mb-2">你的昵称</label>
+            <Input
+              placeholder="请输入您的昵称"
+              value={importNickname}
+              onChange={(e) => setImportNickname(e.target.value)}
+              maxLength={20}
+              size="large"
+            />
+          </div>
+
+          <div>
+            <label className="block text-base font-cave text-sketch-black mb-2">选择导出文件</label>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".json"
+              onChange={handleFileChange}
+              className="w-full px-3 py-2 bg-white border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500 font-cave"
+            />
+            {importFile && (
+              <p className="text-sm text-green-600 mt-2 font-cave">已选择: {importFile.name}</p>
+            )}
+          </div>
+
+          <div>
+            <label className="block text-base font-cave text-sketch-black mb-2">解密密码（可选）</label>
+            <Input.Password
+              placeholder="如果文件已加密，请输入密码"
+              value={importPassword}
+              onChange={(e) => setImportPassword(e.target.value)}
+              size="large"
+            />
+            <p className="text-sm text-sketch-gray mt-2 font-cave">如果导出时设置了密码，请在此输入</p>
+          </div>
+
+          <div className="flex items-start gap-2 p-4 bg-blue-50 rounded-sketch border-2 border-blue-200">
+            <Lock size={18} className="text-blue-600 flex-shrink-0 mt-0.5" />
+            <div className="text-sm text-sketch-gray font-cave">
+              <p className="font-medium mb-1 text-blue-800">导入说明</p>
+              <p>导入将创建一个新房间并还原所有数据，包括聊天记录、代码和白板内容。</p>
             </div>
           </div>
         </Space>
