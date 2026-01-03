@@ -269,6 +269,12 @@ npm install
 cd ..
 ```
 
+### 同时启动前后端（推荐）
+
+```bash
+npm run dev:all
+```
+
 4. 启动信令服务器
 ```bash
 npm run server
@@ -282,12 +288,6 @@ npm run dev
 6. 访问应用
 
 打开浏览器访问 [http://localhost:3000](http://localhost:3000)
-
-### 同时启动前后端（推荐）
-
-```bash
-npm run dev:all
-```
 
 ### 生产部署
 
@@ -383,7 +383,7 @@ npm start
 
 ## 更新日志
 
-### v0.1.3
+### v1.0.3
 
 新增功能：
 - **空闲超时机制**：房间在无在线用户超过设定时间（5/15/30/60 分钟）时自动销毁
