@@ -5,8 +5,8 @@
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
-import { Send, Smile, Image as ImageIcon, Lock, Sparkles, X } from 'lucide-react';
-import { Button, Input, Avatar, message, Dropdown } from 'antd';
+import { Send, Smile, Image as ImageIcon, Lock, Sparkles, X, Download, Maximize2 } from 'lucide-react';
+import { Button, Input, Avatar, message, Dropdown, Modal } from 'antd';
 import { RoomMessage } from '@/types/room';
 
 interface ChatBoxProps {
@@ -31,6 +31,7 @@ export function ChatBox({ messages, currentUserId, onSendMessage, onlineUsers = 
   const [input, setInput] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const [previewImage, setPreviewImage] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -115,6 +116,21 @@ export function ChatBox({ messages, currentUserId, onSendMessage, onlineUsers = 
 
     // 清空 input 以便可以重复上传同一张图片
     e.target.value = '';
+  };
+
+  // 下载图片
+  const downloadImage = (imageUrl: string, fileName: string = 'image') => {
+    try {
+      const link = document.createElement('a');
+      link.href = imageUrl;
+      link.download = `${fileName}-${Date.now()}.png`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    } catch (error) {
+      console.error('[ChatBox] 下载图片失败:', error);
+      message.error('下载失败，请重试');
+    }
   };
 
   // 格式化时间
@@ -207,11 +223,31 @@ export function ChatBox({ messages, currentUserId, onSendMessage, onlineUsers = 
                     >
                       {/* 图片消息 */}
                       {msg.type === 'image' ? (
-                        <img
-                          src={msg.content}
-                          alt="分享的图片"
-                          className="max-w-full max-h-64 object-contain"
-                        />
+                        <div className="relative group">
+                          <img
+                            src={msg.content}
+                            alt="分享的图片"
+                            className="max-w-full max-h-64 object-contain cursor-pointer"
+                            onClick={() => setPreviewImage(msg.content)}
+                          />
+                          {/* 悬停操作栏 */}
+                          <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-4">
+                            <button
+                              onClick={() => setPreviewImage(msg.content)}
+                              className="p-2 bg-white rounded-full hover:bg-gray-100 transition-colors"
+                              title="查看大图"
+                            >
+                              <Maximize2 size={20} className="text-gray-800" />
+                            </button>
+                            <button
+                              onClick={() => downloadImage(msg.content, `chat-${displayName}`)}
+                              className="p-2 bg-white rounded-full hover:bg-gray-100 transition-colors"
+                              title="下载图片"
+                            >
+                              <Download size={20} className="text-gray-800" />
+                            </button>
+                          </div>
+                        </div>
                       ) : (
                         /* 文本消息 */
                         <div className="px-5 py-3">
@@ -308,6 +344,41 @@ export function ChatBox({ messages, currentUserId, onSendMessage, onlineUsers = 
           />
         </div>
       </div>
+
+      {/* 图片预览 Modal */}
+      <Modal
+        open={previewImage !== null}
+        onCancel={() => setPreviewImage(null)}
+        footer={null}
+        centered
+        width="90vw"
+        style={{ maxWidth: '1200px' }}
+        className="image-preview-modal"
+        closable
+        maskClosable
+      >
+        <div className="flex items-center justify-center p-4">
+          <img
+            src={previewImage || ''}
+            alt="预览图片"
+            className="max-w-full max-h-[80vh] object-contain rounded-sketch border-2 border-sketch-black"
+          />
+        </div>
+        {previewImage && (
+          <div className="flex justify-center mt-4">
+            <Button
+              icon={<Download size={16} />}
+              onClick={() => {
+                downloadImage(previewImage, 'chat-image');
+                setPreviewImage(null);
+              }}
+              className="hand-drawn-btn"
+            >
+              下载图片
+            </Button>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }

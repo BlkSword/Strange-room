@@ -91,7 +91,6 @@ export function useRoom(options?: UseRoomOptions) {
       nickname,
       color,
       isOnline: true,
-      isCreator, // 传入创建者标识
     });
 
     setRoom(existingRoom);

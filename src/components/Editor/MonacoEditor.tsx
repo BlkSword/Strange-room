@@ -9,12 +9,12 @@ import { useEffect, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
 import { Download, Copy } from 'lucide-react';
 import { message } from 'antd';
-import type Monaco from '@monaco-editor/react';
+import type { Monaco } from '@monaco-editor/react';
 import { loader } from '@monaco-editor/react';
 
 // Monaco 类型定义
-type editor = Monaco.editor;
-type IStandaloneCodeEditor = editor.IStandaloneCodeEditor;
+type IStandaloneCodeEditor = any;
+type MonacoType = any;
 
 // 配置使用本地 Monaco Editor 文件（仅在客户端）
 if (typeof window !== 'undefined') {
@@ -55,7 +55,7 @@ export function MonacoEditor({
   const [code, setCode] = useState(initialCode);
   const [language, setLanguage] = useState('javascript');
   const editorRef = useRef<IStandaloneCodeEditor | null>(null);
-  const monacoRef = useRef<typeof Monaco | null>(null);
+  const monacoRef = useRef<MonacoType | null>(null);
   const isLocalChangeRef = useRef(false);
 
   // 当 initialCode 从外部变化时（其他用户修改），更新编辑器
@@ -80,7 +80,7 @@ export function MonacoEditor({
 
   const handleEditorMount = (
     editor: IStandaloneCodeEditor,
-    monaco: typeof Monaco
+    monaco: MonacoType
   ) => {
     editorRef.current = editor;
     monacoRef.current = monaco;
@@ -118,13 +118,13 @@ export function MonacoEditor({
     });
 
     // 监听光标变化，同步到其他用户
-    editor.onDidChangeCursorPosition((e) => {
+    editor.onDidChangeCursorPosition((e: any) => {
       // TODO: 通过 Yjs 同步光标位置
       console.log('Cursor position:', e.position);
     });
 
     // 监听选择变化
-    editor.onDidChangeCursorSelection((e) => {
+    editor.onDidChangeCursorSelection((e: any) => {
       // TODO: 通过 Yjs 同步选择区域
       console.log('Selection:', e.selection);
     });
@@ -174,7 +174,7 @@ export function MonacoEditor({
   const renderOtherUsersCursors = () => {
     if (!editorRef.current) return null;
 
-    const decorations: editor.IModelDeltaDecoration[] = [];
+    const decorations: any[] = [];
 
     otherUsers.forEach((user) => {
       if (user.selection) {

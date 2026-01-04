@@ -156,11 +156,11 @@ export function useYjs(options: UseYjsOptions = {}) {
   }, []);
 
   // 监听代码变化
-  const onCodeChange = useCallback((callback: (text: string) => void) => {
+  const onCodeChange = useCallback((callback: (text: string) => void): (() => void) | undefined => {
     const yjs = yjsRef.current;
     if (!yjs) return;
 
-    yjs.onCodeChange(callback);
+    return yjs.onCodeChange(callback);
   }, []);
 
   // 更新光标位置
@@ -235,7 +235,7 @@ export function useYjs(options: UseYjsOptions = {}) {
     const yjs = yjsRef.current;
     if (!yjs) return null;
     try {
-      return await yjs.initEncryption();
+      return await yjs.generateEncryptionKey();
     } catch (error) {
       console.error('[useYjs] 初始化加密失败:', error);
       return null;

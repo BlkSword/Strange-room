@@ -234,7 +234,7 @@ export default function Home() {
           return;
         }
         try {
-          roomData = decryptExportData(data, importPassword);
+          roomData = decryptExportData(data as any, importPassword);
         } catch {
           message.destroy();
           message.error('密码错误或文件已损坏');

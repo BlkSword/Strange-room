@@ -77,7 +77,7 @@ export function getDeviceFingerprint(): string {
     // 7. WebGL 指纹（简化版）
     try {
       const canvas = document.createElement('canvas');
-      const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+      const gl = (canvas.getContext('webgl') || canvas.getContext('experimental-webgl')) as WebGLRenderingContext | null;
       if (gl) {
         const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
         if (debugInfo) {

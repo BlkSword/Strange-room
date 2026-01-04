@@ -268,18 +268,19 @@ export function getExportInfo(data: RoomExportData | EncryptedExportData): {
   roomName?: string;
   exportedAt?: number;
 } {
-  if (data.encrypted) {
+  if ('encrypted' in data && data.encrypted) {
     return {
       version: data.version,
       encrypted: true,
     };
   }
 
+  const exportData = data as RoomExportData;
   return {
-    version: data.version,
+    version: exportData.version,
     encrypted: false,
-    roomId: data.roomId,
-    roomName: data.roomName,
-    exportedAt: data.exportedAt,
+    roomId: exportData.roomId,
+    roomName: exportData.roomName,
+    exportedAt: exportData.exportedAt,
   };
 }

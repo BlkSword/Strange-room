@@ -156,8 +156,8 @@ export class YjsManager {
       console.error('[Yjs] WebSocket 连接错误:', error);
     });
 
-    this.provider.on('sync', (event: { syncStep: number }) => {
-      console.log('[Yjs] 同步进度:', event.syncStep);
+    this.provider.on('sync', (event: any) => {
+      console.log('[Yjs] 同步进度:', event?.syncStep || event);
     });
 
     // 设置当前用户状态
@@ -182,6 +182,11 @@ export class YjsManager {
     // 监听 WebSocket 连接变化
     this.provider.ws?.addEventListener('open', () => {
       console.log('[Yjs] WebSocket 连接已建立');
+      // 连接成功后清除重连超时
+      if (this.reconnectTimeout) {
+        clearTimeout(this.reconnectTimeout);
+        this.reconnectTimeout = null;
+      }
     });
 
     this.provider.ws?.addEventListener('close', (event: CloseEvent) => {
@@ -196,6 +201,24 @@ export class YjsManager {
           this.provider.destroy();
           this.provider = null;
         }
+        return;
+      }
+
+      // 如果应该重连，等待 5 秒后再重连
+      if (this.shouldReconnect && this.provider) {
+        // 清除之前的重连超时
+        if (this.reconnectTimeout) {
+          clearTimeout(this.reconnectTimeout);
+        }
+
+        console.log('[Yjs] 5 秒后将尝试重新连接...');
+        // 5 秒后重连
+        this.reconnectTimeout = setTimeout(() => {
+          if (this.shouldReconnect && this.provider) {
+            console.log('[Yjs] 开始重新连接...');
+            this.provider?.connect();
+          }
+        }, 5000);
       }
     });
 
@@ -396,6 +419,12 @@ export class YjsManager {
     // 停止重连
     this.shouldReconnect = false;
 
+    // 清除重连超时
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = null;
+    }
+
     // 触发销毁回调
     this.destroyCallbacks.forEach(cb => cb());
 
@@ -430,7 +459,7 @@ export class YjsManager {
   /**
    * 初始化加密 - 生成新密钥
    */
-  async initEncryption(): Promise<string> {
+  async generateEncryptionKey(): Promise<string> {
     const result = await this.keyManager.createRoom();
     this.encryptionEnabled = true;
     console.log('[Yjs] E2E 加密已启用，密钥 ID:', result.keyId);

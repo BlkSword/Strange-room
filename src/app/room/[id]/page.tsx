@@ -84,6 +84,8 @@ export default function RoomPage() {
   const connectionStatusRef = useRef<{ isConnected: boolean; hasNotified: boolean }>({ isConnected: false, hasNotified: false });
   // 跟踪之前的在线用户数量
   const prevOnlineUsersCountRef = useRef<number>(0);
+  // 跟踪断开连接的定时器
+  const disconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // 房间销毁处理回调
   const handleRoomDestroyed = useCallback((reason: 'expired' | 'creator_left' | 'manual') => {
@@ -143,13 +145,39 @@ export default function RoomPage() {
       connectionStatusRef.current.isConnected = currentStatus;
 
       if (currentStatus && !connectionStatusRef.current.hasNotified) {
+        // 连接成功，清除断开连接的定时器
+        if (disconnectTimeoutRef.current) {
+          clearTimeout(disconnectTimeoutRef.current);
+          disconnectTimeoutRef.current = null;
+        }
         message.success('已连接到房间');
         connectionStatusRef.current.hasNotified = true;
       } else if (!currentStatus) {
-        message.warning('连接已断开，正在重新连接...');
+        // 连接断开，清除之前的定时器
+        if (disconnectTimeoutRef.current) {
+          clearTimeout(disconnectTimeoutRef.current);
+        }
+
+        // 5 秒后显示警告消息（与重连时间同步）
+        disconnectTimeoutRef.current = setTimeout(() => {
+          // 检查仍然处于断开状态
+          if (!connectionStatusRef.current.isConnected) {
+            message.warning('连接已断开，正在重新连接...');
+          }
+          disconnectTimeoutRef.current = null;
+        }, 5000);
+
         connectionStatusRef.current.hasNotified = false;
       }
     }
+
+    // 清理函数
+    return () => {
+      if (disconnectTimeoutRef.current) {
+        clearTimeout(disconnectTimeoutRef.current);
+        disconnectTimeoutRef.current = null;
+      }
+    };
   }, [isConnected]);
 
   // 监听在线用户变化
@@ -633,7 +661,7 @@ export default function RoomPage() {
         onlineCount={getAllUsers().length}
         isCreator={isCreator}
         inviteLink={inviteLink}
-        encryptionEnabled={encryptionEnabledState && hasEncryption}
+        encryptionEnabled={encryptionEnabledState && hasEncryption()}
         encryptionKeyString={encryptionKey}
         onlineUsers={getAllUsers()}
         onGenerateInvite={handleGenerateInvite}
@@ -647,11 +675,11 @@ export default function RoomPage() {
       <RoomLayout
         chatPanel={
           <ChatBox
-            messages={encryptionEnabledState && hasEncryption ? decryptedMessages : chatMessages}
+            messages={encryptionEnabledState && hasEncryption() ? decryptedMessages : chatMessages}
             currentUserId={yjsPeerId}
             onSendMessage={handleSendMessage}
             onlineUsers={onlineUsers}
-            encryptionEnabled={encryptionEnabledState && hasEncryption}
+            encryptionEnabled={encryptionEnabledState && hasEncryption()}
           />
         }
         whiteboardPanel={

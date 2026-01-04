@@ -25,7 +25,7 @@ export interface RoomExportData {
 
   // Yjs 协同数据
   yjsData: {
-    stateAsUpdate: Uint8Array; // Yjs 文档完整状态（二进制）
+    stateAsUpdate: string; // Yjs 文档完整状态（Base64 编码）
     chat: any[]; // 聊天消息
     code: string; // 代码内容
     canvas: string; // 白板数据（XML字符串）
