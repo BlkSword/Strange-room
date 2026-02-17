@@ -5,6 +5,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { YjsManager, YjsConfig } from '@/lib/yjs/y-doc';
 import { AwarenessState } from '@/types/yjs';
+import { generateRandomNickname } from '@/lib/utils/hash';
 
 const USER_COLORS = [
   '#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A', '#98D8C8',
@@ -32,7 +33,6 @@ export function useYjs(options: UseYjsOptions = {}) {
   useEffect(() => {
     if (options?.peerId && options.peerId !== 'temp_user' && options.peerId !== peerIdRef.current) {
       peerIdRef.current = options.peerId;
-      console.log('[useYjs] peerId 已更新:', options.peerId);
 
       // 更新 Yjs 中的用户信息
       const yjs = yjsRef.current;
@@ -56,7 +56,7 @@ export function useYjs(options: UseYjsOptions = {}) {
       const config: YjsConfig = {
         roomId: options.roomId,
         userId: peerIdRef.current,
-        userName: options.userName || '匿名用户',
+        userName: options.userName || generateRandomNickname(),
         userColor: options.userColor || USER_COLORS[Math.floor(Math.random() * USER_COLORS.length)],
         token: options.token,
         signalingServers: options.signalingServers,
@@ -68,8 +68,7 @@ export function useYjs(options: UseYjsOptions = {}) {
 
       // 监听连接状态
       if (yjs.provider) {
-        yjs.provider.on('sync', (event: any) => {
-          console.log('[useYjs] 同步状态:', event);
+        yjs.provider.on('sync', () => {
           setIsConnected(true);
         });
 
@@ -94,7 +93,6 @@ export function useYjs(options: UseYjsOptions = {}) {
       // 更新在线用户列表 - 监听 awareness 变化
       const updateUsers = () => {
         const users = yjs.getOnlineUsers();
-        console.log('[useYjs] 更新在线用户列表:', users.length, '个用户');
         setOnlineUsers(users);
       };
 
@@ -170,7 +168,51 @@ export function useYjs(options: UseYjsOptions = {}) {
     yjs.updateCursor(x, y, page);
   }, []);
 
-  // 获取其他用户的光标位置
+  // 更新编辑器光标位置
+  const updateEditorCursor = useCallback((lineNumber: number, column: number) => {
+    const yjs = yjsRef.current;
+    if (!yjs) return;
+    yjs.updateEditorCursor(lineNumber, column);
+  }, []);
+
+  // 更新编辑器选择区域
+  const updateEditorSelection = useCallback((selection: {
+    startLineNumber: number;
+    startColumn: number;
+    endLineNumber: number;
+    endColumn: number;
+  }) => {
+    const yjs = yjsRef.current;
+    if (!yjs) return;
+    yjs.updateEditorSelection(selection);
+  }, []);
+
+  // 获取其他用户的编辑器光标位置
+  const getOtherEditorCursors = useCallback((): Map<string, {
+    cursor?: { lineNumber: number; column: number };
+    selection?: { startLineNumber: number; startColumn: number; endLineNumber: number; endColumn: number };
+    user: AwarenessState['user'];
+  }> => {
+    const yjs = yjsRef.current;
+    if (!yjs) return new Map();
+
+    const cursors = new Map();
+    const states = yjs.awareness?.getStates() as Map<number, AwarenessState>;
+
+    states?.forEach((state, _clientId) => {
+      if ((state.editorCursor || state.editorSelection) && state.user?.id !== peerIdRef.current) {
+        cursors.set(state.user.id, {
+          cursor: state.editorCursor,
+          selection: state.editorSelection,
+          user: state.user,
+        });
+      }
+    });
+
+    return cursors;
+  }, []);
+
+  // 获取其他用户的光标位置（用于白板/聊天）
   const getOtherCursors = useCallback((): Map<string, { x: number; y: number; page: string; user: AwarenessState['user'] }> => {
     const yjs = yjsRef.current;
     if (!yjs) return new Map();
@@ -178,7 +220,7 @@ export function useYjs(options: UseYjsOptions = {}) {
     const cursors = new Map();
     const states = yjs.awareness?.getStates() as Map<number, AwarenessState>;
 
-    states?.forEach((state, clientId) => {
+    states?.forEach((state, _clientId) => {
       if (state.cursor && state.user?.id !== peerIdRef.current) {
         cursors.set(state.user.id, {
           x: state.cursor.x,
@@ -280,8 +322,11 @@ export function useYjs(options: UseYjsOptions = {}) {
     getCode,
     onCodeChange,
     updateCursor,
+    updateEditorCursor,
+    updateEditorSelection,
     updateUserInfo,
     getOtherCursors,
+    getOtherEditorCursors,
     setRoomInfo,
     getRoomInfo,
     clearAllData,

@@ -10,7 +10,6 @@ import {
   Clock,
   ArrowRight,
   Lock,
-  Github,
   UserX,
   Upload
 } from "lucide-react";
@@ -163,7 +162,6 @@ export default function Home() {
       }
 
       const token = tokenResult.token;
-      const peerId = generateStableIdFromNickname(joinNickname, joinRoomId.toUpperCase());
 
       localStorage.setItem(`user-nickname-${joinRoomId.toUpperCase()}`, joinNickname);
       localStorage.setItem(`room-token-${joinRoomId.toUpperCase()}`, token);

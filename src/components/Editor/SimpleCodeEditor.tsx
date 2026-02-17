@@ -11,15 +11,13 @@ import { message } from 'antd';
 
 interface CodeEditorProps {
   roomId: string;
-  userId: string;
-  userName: string;
   initialCode?: string;
   onCodeChange?: (code: string) => void;
   otherUsers?: Array<{ id: string; name: string; color: string; selection?: { from: number; to: number } }>;
 }
 
 // 简单的语法高亮
-const highlightSyntax = (code: string, language: string): string => {
+const highlightSyntax = (code: string): string => {
   // HTML 转义
   let escaped = code
     .replace(/&/g, '&amp;')
@@ -53,8 +51,6 @@ const highlightSyntax = (code: string, language: string): string => {
 
 export function SimpleCodeEditor({
   roomId,
-  userId,
-  userName,
   initialCode = '// 在这里开始编写代码...\n',
   onCodeChange,
   otherUsers = [],
@@ -65,7 +61,6 @@ export function SimpleCodeEditor({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const highlightRef = useRef<HTMLPreElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const isLocalChangeRef = useRef(false);
 
   // 更新行号
   useEffect(() => {
@@ -212,7 +207,7 @@ export function SimpleCodeEditor({
               ref={highlightRef}
               className="absolute inset-0 py-3 px-4 m-0 pointer-events-none overflow-auto font-mono text-sm leading-6 text-gray-300"
               style={{ whiteSpace: 'pre-wrap', wordWrap: 'break-word' }}
-              dangerouslySetInnerHTML={{ __html: highlightSyntax(code, language) }}
+              dangerouslySetInnerHTML={{ __html: highlightSyntax(code) }}
             />
             <textarea
               ref={textareaRef}

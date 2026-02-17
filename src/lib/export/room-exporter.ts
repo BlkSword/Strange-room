@@ -116,7 +116,7 @@ export async function importRoomData(
 
       try {
         data = decryptExportData(importData as EncryptedExportData, password);
-      } catch (error) {
+      } catch (_error) {
         return {
           success: false,
           error: '解密失败：密码错误或数据损坏',

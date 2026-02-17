@@ -6,7 +6,6 @@
 
 import { PeerInfo } from '@/types/room';
 import { Crown, User, Sparkles } from 'lucide-react';
-import { Avatar, Badge } from 'antd';
 
 interface UserListProps {
   users: PeerInfo[];

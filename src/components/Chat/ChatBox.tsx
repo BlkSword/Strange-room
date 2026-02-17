@@ -6,7 +6,7 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { Send, Smile, Image as ImageIcon, Lock, Sparkles, X, Download, Maximize2 } from 'lucide-react';
-import { Button, Input, Avatar, message, Dropdown, Modal } from 'antd';
+import { Button, Input, message, Modal } from 'antd';
 import { RoomMessage } from '@/types/room';
 
 interface ChatBoxProps {
@@ -185,7 +185,7 @@ export function ChatBox({ messages, currentUserId, onSendMessage, onlineUsers = 
             const isSystem = msg.type === 'system';
 
             // 从 awareness 或消息本身获取发送者名称
-            const displayName = userNameMap.get(msg.senderId) || msg.senderName || '匿名用户';
+            const displayName = userNameMap.get(msg.senderId) || msg.senderName || '未知用户';
 
             if (isSystem) {
               return (

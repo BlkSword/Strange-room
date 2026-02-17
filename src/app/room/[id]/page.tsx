@@ -19,7 +19,7 @@ import { useRoomExport } from '@/hooks/useRoomExport';
 import { generateToken } from '@/lib/server/api';
 import { Room } from '@/types/room';
 import { message, Modal } from 'antd';
-import { generateStableIdFromNickname } from '@/lib/utils/hash';
+import { generateStableIdFromNickname, generateRandomNickname } from '@/lib/utils/hash';
 
 const USER_COLORS = [
   '#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A', '#98D8C8',
@@ -48,7 +48,6 @@ export default function RoomPage() {
   const [nickname, setNickname] = useState('');
   const [nicknameInput, setNicknameInput] = useState('');
   const [inviteLink, setInviteLink] = useState<string>('');
-  const [roomInfo, setRoomInfo] = useState<Room | null>(null);
   const [userColor] = useState<string>(() =>
     USER_COLORS[Math.floor(Math.random() * USER_COLORS.length)]
   );
@@ -63,7 +62,6 @@ export default function RoomPage() {
     if (nickname && nickname.trim()) {
       const newPeerId = generateStableIdFromNickname(nickname, roomId);
       if (newPeerId !== userPeerId) {
-        console.log('[Room] 昵称变化，更新 userPeerId:', nickname, '->', newPeerId);
         setUserPeerId(newPeerId);
       }
     }
@@ -89,20 +87,19 @@ export default function RoomPage() {
 
   // 房间销毁处理回调
   const handleRoomDestroyed = useCallback((reason: 'expired' | 'creator_left' | 'manual') => {
-    console.log('[Room] handleRoomDestroyed 被调用, reason:', reason);
     setDestroyReason(reason);
     setDestroyModalOpen(true);
   }, []);
 
   // Hooks
-  const { room, remainingTime, isCreator, peerId, joinRoom, destroyRoom, formatRemainingTime, setCreatedAt } = useRoom({
+  const { room, remainingTime, isCreator, peerId, joinRoom, destroyRoom, setCreatedAt } = useRoom({
     peerId: userPeerId,
     onRoomDestroyed: handleRoomDestroyed,
   });
 
   // Debug: 监听 isCreator 变化
   useEffect(() => {
-    console.log('[Room] isCreator 状态变化:', isCreator);
+    // isCreator 状态变化
   }, [isCreator]);
 
   // 获取或初始化加密密钥
@@ -119,7 +116,7 @@ export default function RoomPage() {
     return false;
   });
 
-  const { isConnected, onlineUsers, chatMessages, decryptedMessages, sendMessage, updateCode, getCode, yjs, updateUserInfo, onCodeChange, peerId: yjsPeerId, initEncryption, importEncryptionKey, hasEncryption } = useYjs({
+  const { isConnected, onlineUsers, chatMessages, decryptedMessages, sendMessage, updateCode, getCode, yjs, updateUserInfo, onCodeChange, peerId: yjsPeerId, initEncryption, importEncryptionKey, hasEncryption, updateEditorCursor, updateEditorSelection, getOtherEditorCursors } = useYjs({
     roomId,
     peerId: userPeerId, // 传递基于昵称生成的 peerId
     userName: nickname,
@@ -232,7 +229,6 @@ export default function RoomPage() {
 
     // 如果URL中包含加密密钥，保存到localStorage
     if (urlEncryptionKey) {
-      console.log('[Room] 从URL获取到加密密钥');
       localStorage.setItem(`room-encryption-key-${roomId}`, urlEncryptionKey);
       setEncryptionKey(urlEncryptionKey);
       setEncryptionEnabledState(true);
@@ -241,7 +237,6 @@ export default function RoomPage() {
     if (savedRoomData) {
       try {
         const parsed = JSON.parse(savedRoomData);
-        setRoomInfo(parsed);
 
         if (savedNickname) {
           setNickname(savedNickname);
@@ -249,8 +244,6 @@ export default function RoomPage() {
           // 检查是否是创建者 - 直接基于保存的昵称重新计算 peer ID
           const calculatedPeerId = generateStableIdFromNickname(savedNickname, roomId);
           const amICreator = parsed.creatorPeerId === calculatedPeerId;
-
-          console.log('[Room] 返回用户 - 计算的peerId:', calculatedPeerId, '创建者peerId:', parsed.creatorPeerId, '是创建者:', amICreator);
 
           // 立即更新 userPeerId
           setUserPeerId(calculatedPeerId);
@@ -269,11 +262,10 @@ export default function RoomPage() {
           // 首次进入，需要先输入昵称，然后检查是否是创建者
           // 先让用户输入昵称，输入后再检查是否是创建者
           const amICreator = false; // 先设为 false，等输入昵称后再重新计算
-          console.log('[Room] 首次进入 - 需要输入昵称');
           showNicknameModal(parsed, amICreator);
         }
       } catch (e) {
-        console.error('Failed to parse room info:', e);
+        console.error('[Room] Failed to parse room info:', e);
         setAccessDenied(true);
       }
     } else {
@@ -323,7 +315,6 @@ export default function RoomPage() {
       try {
         const roomData = JSON.parse(roomDataStr);
         if (roomData.createdAt && roomData.ttl) {
-          console.log('[Room] 从 Yjs 同步房间创建时间:', new Date(roomData.createdAt).toISOString());
           setCreatedAt(roomData.createdAt, roomData.ttl, roomData.idleTimeout || 15, roomData.lastActiveAt);
         }
       } catch (e) {
@@ -349,22 +340,18 @@ export default function RoomPage() {
 
       // 如果已有保存的密钥，直接导入
       if (encryptionKey) {
-        console.log('[Room] 导入已有加密密钥');
         await importEncryptionKey(encryptionKey);
         return;
       }
 
       // 如果是创建者且没有密钥，生成新密钥
       if (isCreator && room) {
-        console.log('[Room] 创建者生成新的加密密钥');
         const newKeyString = await initEncryption();
         if (newKeyString) {
           setEncryptionKey(newKeyString);
           localStorage.setItem(`room-encryption-key-${roomId}`, newKeyString);
           message.success('端到端加密已启用');
         }
-      } else {
-        console.log('[Room] 等待获取加密密钥...');
       }
     };
 
@@ -390,7 +377,6 @@ export default function RoomPage() {
 
     try {
       const importData = JSON.parse(importDataStr);
-      console.log('[Room] 开始还原导入数据...');
 
       // 应用 Yjs 状态更新
       if (importData.stateAsUpdate) {
@@ -401,7 +387,6 @@ export default function RoomPage() {
           bytes[i] = binaryString.charCodeAt(i);
         }
         Y.applyUpdate(yjs.doc, bytes);
-        console.log('[Room] Yjs 状态已还原');
       }
 
       // 清除 sessionStorage 中的导入数据
@@ -416,7 +401,6 @@ export default function RoomPage() {
 
   // 显示昵称输入弹窗
   const showNicknameModal = useCallback((existingRoom: any, isCreator: boolean = false) => {
-    console.log('[Room] showNicknameModal 被调用, isCreator:', isCreator);
     setPendingRoomData({ room: existingRoom, isCreator });
     setNicknameInput('');
     setNicknameModalOpen(true);
@@ -424,14 +408,14 @@ export default function RoomPage() {
 
   // 处理昵称输入确认
   const handleNicknameConfirm = useCallback(() => {
-    const name = nicknameInput.trim() || '匿名用户';
+    // 禁止匿名用户：如果没有输入昵称，生成随机昵称
+    const name = nicknameInput.trim() || generateRandomNickname();
     setNickname(name);
     setNicknameModalOpen(false);
 
     // 基于昵称生成并更新 userPeerId
     const newPeerId = generateStableIdFromNickname(name, roomId);
     setUserPeerId(newPeerId);
-    console.log('[Room] 昵称设置:', name, '生成 userPeerId:', newPeerId);
 
     if (pendingRoomData.room) {
       // 重新计算是否是创建者
@@ -443,7 +427,6 @@ export default function RoomPage() {
         peers: new Map(),
         destroyed: false,
       };
-      console.log('[Room] 昵称确认, 调用 joinRoom, isCreator:', amICreator);
       joinRoom(room, name, amICreator);
     }
 
@@ -482,18 +465,14 @@ export default function RoomPage() {
 
   // 销毁房间处理
   const handleDestroyRoom = useCallback(async () => {
-    console.log('[Room] 点击销毁房间按钮, isCreator:', isCreator, 'peerId:', peerId);
-
     if (!isCreator) {
       message.error('只有房间创建者才能销毁房间');
       return;
     }
 
-    console.log('[Room] 调用 destroyRoom...');
     // 调用 destroyRoom（成功后会自动触发 onRoomDestroyed 回调显示Modal）
     const success = await destroyRoom();
 
-    console.log('[Room] destroyRoom 返回:', success);
     if (!success) {
       message.error('销毁房间失败');
     }
@@ -584,13 +563,26 @@ export default function RoomPage() {
     }
   }, [encryptionKey, roomId, token]);
 
-  // 获取在线用户列表
+  // 获取在线用户列表（过滤掉临时用户和重复ID）
   const getAllUsers = useCallback(() => {
-    return onlineUsers.map((u) => ({
-      id: u.user?.id || '',
-      nickname: u.user?.name || '匿名用户',
+    const uniqueUsers = new Map<string, typeof onlineUsers[0]>();
+
+    // 过滤掉 temp_user 并去重
+    onlineUsers.forEach((u) => {
+      const userId = u.user?.id;
+      // 跳过 temp_user
+      if (!userId || userId === 'temp_user') {
+        return;
+      }
+      // 如果已存在该 ID，保留最新的
+      uniqueUsers.set(userId, u);
+    });
+
+    return Array.from(uniqueUsers.values()).map((u) => ({
+      id: u.user!.id,
+      nickname: u.user?.name || '未知用户',
       color: u.user?.color || '#3b82f6',
-      joinedAt: Date.now(), // 注意：这会导致每次重新渲染，但暂时保留
+      joinedAt: Date.now(),
       isCreator: u.user?.id === room?.creatorPeerId,
       isOnline: true,
     }));
@@ -693,10 +685,11 @@ export default function RoomPage() {
         editorPanel={
           <MonacoEditor
             roomId={roomId}
-            userId={peerId}
-            userName={nickname}
             initialCode={currentCode}
             onCodeChange={handleCodeChange}
+            onCursorChange={updateEditorCursor}
+            onSelectionChange={updateEditorSelection}
+            otherEditorCursors={getOtherEditorCursors()}
             otherUsers={onlineUsers
               .filter(u => u.user?.id !== peerId)
               .map(u => ({
@@ -721,7 +714,8 @@ export default function RoomPage() {
         maskClosable={false}
       >
         <div>
-          <p className="mb-4 text-gray-600">请输入您的昵称</p>
+          <p className="mb-2 text-gray-600 font-medium">请输入您的昵称</p>
+          <p className="mb-4 text-sm text-gray-500">不输入昵称将自动生成随机昵称</p>
           <input
             type="text"
             placeholder="您的昵称"

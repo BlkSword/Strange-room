@@ -9,6 +9,7 @@ import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { validateToken, checkRoom } from '@/lib/server/api';
 import { Modal, message, Input, Button } from 'antd';
 import { Home } from 'lucide-react';
+import { generateRandomNickname } from '@/lib/utils/hash';
 
 export default function JoinPage() {
   const params = useParams();
@@ -84,7 +85,8 @@ export default function JoinPage() {
   };
 
   const handleJoin = () => {
-    const finalNickname = nickname.trim() || '匿名用户';
+    // 禁止匿名用户：如果没有输入昵称，生成随机昵称
+    const finalNickname = nickname.trim() || generateRandomNickname();
 
     // 保存令牌到 localStorage
     localStorage.setItem(`room-token-${roomId}`, urlToken!);
@@ -163,7 +165,8 @@ export default function JoinPage() {
         centered
       >
         <div className="py-4">
-          <p className="mb-4 text-gray-600">请输入您的昵称</p>
+          <p className="mb-2 text-gray-600 font-medium">请输入您的昵称</p>
+          <p className="mb-4 text-sm text-gray-500">不输入昵称将自动生成随机昵称</p>
           <Input
             placeholder="您的昵称"
             value={nickname}

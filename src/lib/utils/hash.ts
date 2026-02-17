@@ -163,12 +163,12 @@ export function generateIdFromNickname(nickname: string): string {
  * @returns 唯一的用户ID
  */
 export function generateStableIdFromNickname(nickname: string, roomId: string): string {
-  // 处理空昵称：使用默认昵称
-  const safeNickname = (nickname || '匿名用户').trim();
+  // 处理空昵称：生成随机昵称（禁止匿名用户）
+  const safeNickname = (nickname || generateRandomNickname()).trim();
 
-  // 昵称不能为空，如果为空则使用默认值
+  // 昵称不能为空，如果为空则使用随机昵称
   if (!safeNickname) {
-    return `user_${Math.random().toString(36).substring(2, 10)}`;
+    return `user_${generateRandomNickname().replace(/\s/g, '_')}_${Math.random().toString(36).substring(2, 8)}`;
   }
 
   // 获取设备指纹
@@ -202,4 +202,32 @@ export function generateStableIdFromNickname(nickname: string, roomId: string): 
  */
 export function isSameUser(nickname1: string, nickname2: string, roomId: string): boolean {
   return generateStableIdFromNickname(nickname1, roomId) === generateStableIdFromNickname(nickname2, roomId);
+}
+
+/**
+ * 随机昵称生成词库
+ */
+const ADJECTIVES = [
+  '勇敢', '机智', '快乐', '神秘', '闪亮', '温柔', '坚强', '活泼',
+  '聪明', '优雅', '热情', '冷静', '真诚', '幽默', '自信', '谦虚',
+  '开朗', '沉稳', '灵活', '专注', '创意', '勤奋', '友善', '独立',
+];
+
+const ANIMALS = [
+  '熊猫', '狐狸', '兔子', '老虎', '狮子', '大象', '海豚', '企鹅',
+  '猫咪', '小狗', '松鼠', '刺猬', '鹿鹿', '熊猫', '考拉', '海豹',
+  '天鹅', '孔雀', '鹦鹉', '蝴蝶', '蜜蜂', '蚂蚁', '螃蟹', '海星',
+];
+
+/**
+ * 生成随机昵称
+ * 禁止匿名用户，如果没有输入昵称则生成随机昵称
+ * @returns 随机生成的昵称
+ */
+export function generateRandomNickname(): string {
+  const adj = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)];
+  const animal = ANIMALS[Math.floor(Math.random() * ANIMALS.length)];
+  const randomNum = Math.floor(Math.random() * 1000);
+
+  return `${adj}的${animal}${randomNum}`;
 }

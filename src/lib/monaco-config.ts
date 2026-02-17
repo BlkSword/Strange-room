@@ -16,9 +16,9 @@ export const monacoConfig = {
  */
 export function initMonacoConfig() {
   if (typeof window !== 'undefined') {
-    // @ts-ignore - Monaco 全局配置
+    // @ts-expect-error - Monaco 全局配置
     window.MonacoEnvironment = {
-      getWorkerUrl: function (workerId: string, label: string) {
+      getWorkerUrl: function (workerId: string, _label: string) {
         return `/monaco-editor/min/vs/base/workers/${workerId}`;
       }
     };

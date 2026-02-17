@@ -76,7 +76,7 @@ export class YjsManager {
       );
 
       this.idbPersistence.on('sync', () => {
-        console.log('[Yjs] 数据已从 IndexedDB 同步');
+        // 数据已从 IndexedDB 同步
       });
     } catch (error) {
       console.error('[Yjs] IndexedDB 初始化失败:', error);
@@ -109,9 +109,6 @@ export class YjsManager {
     // y-websocket 会自动在 URL 后面添加 /roomId
     const wsUrl = `${baseUrl}/yjs`;
 
-    console.log('[Yjs] WebSocket URL:', wsUrl);
-    console.log('[Yjs] 当前页面 origin:', origin);
-
     try {
       this.provider = new WebsocketProvider(
         wsUrl,
@@ -125,7 +122,6 @@ export class YjsManager {
           },
         }
       );
-      console.log('[Yjs] WebsocketProvider 创建成功');
     } catch (error) {
       console.error('[Yjs] WebsocketProvider 创建失败:', error);
       throw error;
@@ -134,21 +130,12 @@ export class YjsManager {
     // 暴露到全局用于调试
     if (typeof window !== 'undefined') {
       (window as any).__yjsProvider__ = this.provider;
-      console.log('[Yjs] Provider 已暴露到 window.__yjsProvider__');
     }
 
     this.awareness = this.provider.awareness;
 
-    console.log('[Yjs] ========== WebSocket 配置 ==========');
-    console.log('[Yjs] 房间 ID:', this.config.roomId);
-    console.log('[Yjs] 用户 ID:', this.config.userId);
-    console.log('[Yjs] WebSocket URL:', wsUrl);
-    console.log('[Yjs] Token:', this.config.token?.substring(0, 8) + '...');
-    console.log('[Yjs] =====================================');
-
     // 监听 WebSocket 连接状态
     this.provider.on('status', (event: { status: string }) => {
-      console.log('[Yjs] WebSocket 状态:', event.status);
       // status: 'connecting' | 'connected' | 'disconnected'
     });
 
@@ -157,7 +144,7 @@ export class YjsManager {
     });
 
     this.provider.on('sync', (event: any) => {
-      console.log('[Yjs] 同步进度:', event?.syncStep || event);
+      // 同步进度更新
     });
 
     // 设置当前用户状态
@@ -172,16 +159,11 @@ export class YjsManager {
     // 监听其他用户变化
     this.awareness.on('change', () => {
       const states = this.awareness.getStates() as Map<number, AwarenessState>;
-      console.log('[Yjs] Awareness 变化, 在线用户数:', states.size);
-      states.forEach((state, clientId) => {
-        console.log('[Yjs] 用户:', state.user?.name, 'ID:', state.user?.id);
-      });
       this.onAwarenessChange(states);
     });
 
     // 监听 WebSocket 连接变化
     this.provider.ws?.addEventListener('open', () => {
-      console.log('[Yjs] WebSocket 连接已建立');
       // 连接成功后清除重连超时
       if (this.reconnectTimeout) {
         clearTimeout(this.reconnectTimeout);
@@ -190,8 +172,6 @@ export class YjsManager {
     });
 
     this.provider.ws?.addEventListener('close', (event: CloseEvent) => {
-      console.log('[Yjs] WebSocket 连接已关闭, code:', event.code, 'reason:', event.reason);
-
       // 如果服务器明确表示房间不存在或已销毁（1008 状态码），停止重连
       if (event.code === 1008 && (event.reason === 'room_not_found' || event.reason === 'room_destroyed')) {
         console.warn('[Yjs] 房间不存在或已销毁，停止重连');
@@ -211,11 +191,9 @@ export class YjsManager {
           clearTimeout(this.reconnectTimeout);
         }
 
-        console.log('[Yjs] 5 秒后将尝试重新连接...');
         // 5 秒后重连
         this.reconnectTimeout = setTimeout(() => {
           if (this.shouldReconnect && this.provider) {
-            console.log('[Yjs] 开始重新连接...');
             this.provider?.connect();
           }
         }, 5000);
@@ -254,6 +232,29 @@ export class YjsManager {
   }
 
   /**
+   * 更新编辑器光标位置
+   */
+  updateEditorCursor(lineNumber: number, column: number) {
+    this.setAwarenessState({
+      editorCursor: { lineNumber, column },
+    });
+  }
+
+  /**
+   * 更新编辑器选择区域
+   */
+  updateEditorSelection(selection: {
+    startLineNumber: number;
+    startColumn: number;
+    endLineNumber: number;
+    endColumn: number;
+  }) {
+    this.setAwarenessState({
+      editorSelection: selection,
+    });
+  }
+
+  /**
    * 更新用户信息（昵称等）
    */
   updateUserInfo(userName: string, userColor?: string) {
@@ -268,7 +269,6 @@ export class YjsManager {
         color: userColor || this.config.userColor,
       },
     });
-    console.log('[Yjs] 用户信息已更新:', userName);
   }
 
   /**
@@ -276,7 +276,6 @@ export class YjsManager {
    */
   getOnlineUsers(): AwarenessState[] {
     if (!this.awareness) {
-      console.log('[Yjs] getOnlineUsers: awareness 不存在');
       return [];
     }
 
@@ -287,7 +286,6 @@ export class YjsManager {
       }
     });
 
-    console.log('[Yjs] getOnlineUsers: 返回', states.length, '个用户');
     return states;
   }
 
@@ -382,11 +380,9 @@ export class YjsManager {
    * 设置房间信息
    */
   setRoomInfo(key: string, value: any) {
-    console.log('[Yjs] setRoomInfo:', key, value?.substring?.(0, 50) || value);
     this.doc.transact(() => {
       this.roomInfoMap.set(key, value);
     });
-    console.log('[Yjs] setRoomInfo 完成，当前 roomInfoMap 大小:', this.roomInfoMap.size);
   }
 
   /**
@@ -414,8 +410,6 @@ export class YjsManager {
    * 销毁 Yjs 实例
    */
   destroy() {
-    console.log('[Yjs] 正在销毁实例...');
-
     // 停止重连
     this.shouldReconnect = false;
 
@@ -450,8 +444,6 @@ export class YjsManager {
 
     // 销毁文档
     this.doc.destroy();
-
-    console.log('[Yjs] 实例已销毁，WebSocket 已断开');
   }
 
   // ========== 端到端加密相关方法 ==========
@@ -462,7 +454,6 @@ export class YjsManager {
   async generateEncryptionKey(): Promise<string> {
     const result = await this.keyManager.createRoom();
     this.encryptionEnabled = true;
-    console.log('[Yjs] E2E 加密已启用，密钥 ID:', result.keyId);
     return result.keyString;
   }
 
@@ -472,7 +463,6 @@ export class YjsManager {
   async initEncryption(keyString: string): Promise<void> {
     await this.keyManager.joinRoom(keyString);
     this.encryptionEnabled = true;
-    console.log('[Yjs] E2E 加密已启用（导入密钥）');
   }
 
   /**
@@ -487,7 +477,6 @@ export class YjsManager {
    */
   async sendEncryptedChatMessage(content: string, type: 'text' | 'image' | 'file' | 'system' = 'text') {
     if (!this.encryptionEnabled) {
-      console.warn('[Yjs] 加密未启用，发送未加密消息');
       return this.sendChatMessage(content, type);
     }
 
@@ -531,7 +520,6 @@ export class YjsManager {
     }
 
     if (!this.encryptionEnabled) {
-      console.warn('[Yjs] 加密未启用，无法解密消息');
       return {
         ...message,
         content: '[加密消息 - 无法解密]',

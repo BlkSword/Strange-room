@@ -5,7 +5,7 @@
 'use client';
 
 import { RoomTTL } from '@/types/room';
-import { Clock, Users, Share2, Copy, Check, Crown, Shield, Trash2, Lock, Sparkles, Download } from 'lucide-react';
+import { Clock, Users, Share2, Check, Crown, Shield, Trash2, Lock, Sparkles, Download } from 'lucide-react';
 import { useState } from 'react';
 import { Button, Tooltip, Modal, Input } from 'antd';
 

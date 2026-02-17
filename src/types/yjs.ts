@@ -19,6 +19,18 @@ export interface AwarenessState {
     y: number;
     page: 'chat' | 'whiteboard' | 'editor';
   };
+  // 编辑器光标位置（Monaco Editor）
+  editorCursor?: {
+    lineNumber: number;
+    column: number;
+  };
+  // 编辑器选择区域（Monaco Editor）
+  editorSelection?: {
+    startLineNumber: number;
+    startColumn: number;
+    endLineNumber: number;
+    endColumn: number;
+  };
   selection?: {
     from: number;
     to: number;

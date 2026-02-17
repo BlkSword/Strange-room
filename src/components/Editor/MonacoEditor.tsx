@@ -9,7 +9,6 @@ import { useEffect, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
 import { Download, Copy } from 'lucide-react';
 import { message } from 'antd';
-import type { Monaco } from '@monaco-editor/react';
 import { loader } from '@monaco-editor/react';
 
 // Monaco 类型定义
@@ -35,28 +34,54 @@ const Editor = dynamic(() => import('@monaco-editor/react'), {
   )
 });
 
-interface CodeEditorProps {
-  roomId: string;
+// Monaco 编辑器光标和选择信息
+interface EditorCursor {
+  lineNumber: number;
+  column: number;
+}
+
+interface EditorSelection {
+  startLineNumber: number;
+  startColumn: number;
+  endLineNumber: number;
+  endColumn: number;
+}
+
+// 其他用户的编辑器光标信息
+interface OtherUserEditorCursor {
   userId: string;
   userName: string;
+  color: string;
+  cursor?: EditorCursor;
+  selection?: EditorSelection;
+}
+
+interface CodeEditorProps {
+  roomId: string;
   initialCode?: string;
   onCodeChange?: (code: string) => void;
   otherUsers?: Array<{ id: string; name: string; color: string; selection?: { from: number; to: number } }>;
+  // 编辑器协同编辑相关回调
+  onCursorChange?: (cursor: EditorCursor) => void;
+  onSelectionChange?: (selection: EditorSelection) => void;
+  otherEditorCursors?: Map<string, OtherUserEditorCursor>;
 }
 
 export function MonacoEditor({
   roomId,
-  userId,
-  userName,
   initialCode = '// 在这里开始编写代码...\n',
   onCodeChange,
   otherUsers = [],
+  onCursorChange,
+  onSelectionChange,
+  otherEditorCursors,
 }: CodeEditorProps) {
   const [code, setCode] = useState(initialCode);
   const [language, setLanguage] = useState('javascript');
   const editorRef = useRef<IStandaloneCodeEditor | null>(null);
   const monacoRef = useRef<MonacoType | null>(null);
   const isLocalChangeRef = useRef(false);
+  const decorationsCollectionRef = useRef<any>(null); // 存储其他用户光标的装饰集合
 
   // 当 initialCode 从外部变化时（其他用户修改），更新编辑器
   useEffect(() => {
@@ -119,15 +144,28 @@ export function MonacoEditor({
 
     // 监听光标变化，同步到其他用户
     editor.onDidChangeCursorPosition((e: any) => {
-      // TODO: 通过 Yjs 同步光标位置
-      console.log('Cursor position:', e.position);
+      if (onCursorChange && e.position) {
+        onCursorChange({
+          lineNumber: e.position.lineNumber,
+          column: e.position.column,
+        });
+      }
     });
 
     // 监听选择变化
     editor.onDidChangeCursorSelection((e: any) => {
-      // TODO: 通过 Yjs 同步选择区域
-      console.log('Selection:', e.selection);
+      if (onSelectionChange && e.selection) {
+        onSelectionChange({
+          startLineNumber: e.selection.startLineNumber,
+          startColumn: e.selection.startColumn,
+          endLineNumber: e.selection.endLineNumber,
+          endColumn: e.selection.endColumn,
+        });
+      }
     });
+
+    // 创建 decorations 集合用于显示其他用户的光标
+    decorationsCollectionRef.current = editor.createDecorationsCollection([]);
   };
 
   const handleCodeChange = (value: string | undefined) => {
@@ -170,31 +208,97 @@ export function MonacoEditor({
     message.success('代码已下载');
   };
 
-  // 渲染其他用户的光标
+  // 渲染其他用户的光标和选择区域
   const renderOtherUsersCursors = () => {
-    if (!editorRef.current) return null;
+    if (!editorRef.current || !decorationsCollectionRef.current) return;
 
     const decorations: any[] = [];
 
-    otherUsers.forEach((user) => {
-      if (user.selection) {
-        decorations.push({
-          range: {
-            startLineNumber: 1,
-            startColumn: user.selection.from,
-            endLineNumber: 1,
-            endColumn: user.selection.to,
-          },
-          options: {
-            className: `other-user-selection-${user.id}`,
-            hoverMessage: { value: user.name },
-          },
-        });
-      }
-    });
+    // 遍历其他用户的编辑器光标信息
+    if (otherEditorCursors) {
+      otherEditorCursors.forEach((userCursor) => {
+        const { cursor, selection, userName, color } = userCursor;
 
-    // TODO: 使用 Monaco 的 decorations API 渲染其他用户的光标
+        // 渲染光标位置
+        if (cursor) {
+          decorations.push({
+            range: {
+              startLineNumber: cursor.lineNumber,
+              startColumn: cursor.column,
+              endLineNumber: cursor.lineNumber,
+              endColumn: cursor.column,
+            },
+            options: {
+              className: `other-user-cursor-${userCursor.userId}`,
+              stickiness: 1, // AlwaysGrowsWhenTypingAtEdges
+              beforeContentClassName: `remote-cursor-before`,
+              hoverMessage: { value: userName },
+            },
+          });
+        }
+
+        // 渲染选择区域
+        if (selection) {
+          decorations.push({
+            range: {
+              startLineNumber: selection.startLineNumber,
+              startColumn: selection.startColumn,
+              endLineNumber: selection.endLineNumber,
+              endColumn: selection.endColumn,
+            },
+            options: {
+              className: `other-user-selection`,
+              backgroundColor: `${color}20`, // 添加透明度
+              overviewRuler: {
+                color: color,
+                position: 4, // Right
+              },
+              hoverMessage: { value: `${userName} 正在选择` },
+            },
+          });
+        }
+      });
+    }
+
+    // 更新 decorations
+    decorationsCollectionRef.current.set(decorations);
   };
+
+  // 监听 otherEditorCursors 变化，更新显示
+  useEffect(() => {
+    renderOtherUsersCursors();
+  }, [otherEditorCursors]);
+
+  // 注入 CSS 样式用于其他用户光标
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+
+    // 检查是否已存在样式
+    if (document.getElementById('monaco-remote-cursors-style')) return;
+
+    const style = document.createElement('style');
+    style.id = 'monaco-remote-cursors-style';
+    style.textContent = `
+      .other-user-selection {
+        opacity: 0.3;
+      }
+      .remote-cursor-before {
+        position: absolute;
+        width: 2px !important;
+        height: 100% !important;
+        animation: blink 1s infinite;
+      }
+      @keyframes blink {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.3; }
+      }
+    `;
+    document.head.appendChild(style);
+
+    return () => {
+      style.remove();
+    };
+  }, []);
 
   return (
     <div className="h-full flex flex-col bg-slate-900">

@@ -10,7 +10,6 @@ import {
   Undo2, Redo2, Palette, MinusCircle
 } from 'lucide-react';
 import { message, Dropdown, ColorPicker, Slider } from 'antd';
-import type { ColorPickerProps } from 'antd';
 import type { YjsManager } from '@/lib/yjs/y-doc';
 
 type Tool =
@@ -39,14 +38,6 @@ interface DrawOperation {
   text?: string;
 }
 
-interface TextElement {
-  x: number;
-  y: number;
-  text: string;
-  color: string;
-  fontSize: number;
-}
-
 export function Canvas({ roomId, userId, userName, yjs }: WhiteboardProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -59,7 +50,6 @@ export function Canvas({ roomId, userId, userName, yjs }: WhiteboardProps) {
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [isFill, setIsFill] = useState(false);
   const [showColorPicker, setShowColorPicker] = useState(false);
-  const [showAdvanced, setShowAdvanced] = useState(false);
   const [textInput, setTextInput] = useState<{ x: number; y: number } | null>(null);
   const [textValue, setTextValue] = useState('');
 

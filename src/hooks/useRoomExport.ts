@@ -12,7 +12,6 @@ import {
   validateExportData,
   getExportInfo,
 } from '@/lib/export';
-import { RoomExportData, EncryptedExportData } from '@/types/export';
 import { YjsManager } from '@/lib/yjs/y-doc';
 import { Room } from '@/types/room';
 
@@ -139,7 +138,7 @@ export function useRoomExport({ yjs, room, roomId }: UseRoomExportOptions) {
    * 验证导出文件密码（不导入）
    */
   const verifyFilePassword = useCallback(
-    async (file: File, password: string): Promise<boolean> => {
+    async (file: File, _password: string): Promise<boolean> => {
       try {
         const data = await readExportFile(file);
 
