@@ -2,6 +2,11 @@
 resolver = "2"
 members = ["crates/core", "crates/cli", "crates/desktop"]
 
+# 日常 `cargo build` / `cargo test`（不带 -p）只构建内核与 CLI。
+# 桌面端依赖 Tauri，编译产物有 2-3GB——不该让每次跑测试都把它拖上。
+# 需要界面时显式指定：cargo run -p sr-desktop
+default-members = ["crates/core", "crates/cli"]
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
@@ -13,3 +18,12 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 panic = "abort"
+
+[profile.dev]
+# 自家代码保留行号（panic 与 backtrace 仍然可读），但不要完整调试信息
+debug = 1
+
+[profile.dev.package."*"]
+# 依赖一律不带调试信息。这是 target/ 体积的大头：光一个依赖的 rlib
+# 就能有上百 MB，而调试时几乎用不到
+debug = false
