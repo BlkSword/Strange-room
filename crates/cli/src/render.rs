@@ -51,6 +51,23 @@ pub fn print_qr(payload: &str, no_qr: bool) {
     }
 }
 
+/// 这一端在当前传输里的角色。只影响提示语的措辞——发送端屏幕上曾经
+/// 写着"开始接收"，用户第一眼就会以为自己搞反了方向。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    Send,
+    Receive,
+}
+
+impl Role {
+    fn verb(self) -> &'static str {
+        match self {
+            Role::Send => "发送",
+            Role::Receive => "接收",
+        }
+    }
+}
+
 /// 后台线程消费进度事件并渲染进度条。
 ///
 /// 刻意做成"独立线程 + channel"：渲染绝不阻塞传输主循环，
@@ -60,8 +77,8 @@ pub struct ProgressRenderer {
 }
 
 impl ProgressRenderer {
-    pub fn spawn(rx: tokio::sync::broadcast::Receiver<ProgressEvent>) -> Self {
-        let handle = thread::spawn(move || render_loop(rx));
+    pub fn spawn(rx: tokio::sync::broadcast::Receiver<ProgressEvent>, role: Role) -> Self {
+        let handle = thread::spawn(move || render_loop(rx, role));
         Self {
             handle: Some(handle),
         }
@@ -110,7 +127,7 @@ impl ProgressModel {
     }
 }
 
-fn render_loop(mut rx: tokio::sync::broadcast::Receiver<ProgressEvent>) {
+fn render_loop(mut rx: tokio::sync::broadcast::Receiver<ProgressEvent>, role: Role) {
     let multi = MultiProgress::new();
     let overall = multi.add(ProgressBar::new(0));
     if let Ok(style) = ProgressStyle::with_template(
@@ -142,7 +159,9 @@ fn render_loop(mut rx: tokio::sync::broadcast::Receiver<ProgressEvent>) {
                 total_bytes = tb;
                 model = ProgressModel::default();
                 started = Instant::now();
-                multi.suspend(|| println!("已连接到 {peer}，开始接收 {total_files} 个文件"));
+                multi.suspend(|| {
+                    println!("已连接到 {peer}，开始{} {total_files} 个文件", role.verb())
+                });
                 overall.set_length(tb);
             }
             ProgressEvent::FileStarted {
@@ -288,7 +307,7 @@ mod tests {
     fn renderer_exits_when_channel_closes() {
         // 通道关闭后渲染线程必须退出，否则 CLI 会挂住
         let (tx, rx) = tokio::sync::broadcast::channel::<ProgressEvent>(4);
-        let renderer = ProgressRenderer::spawn(rx);
+        let renderer = ProgressRenderer::spawn(rx, Role::Receive);
         drop(tx);
         renderer.finish();
     }

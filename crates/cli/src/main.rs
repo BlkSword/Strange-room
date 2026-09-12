@@ -171,7 +171,7 @@ async fn send(
     println!("\n等待对方接收……（在此终端按 Ctrl+C 可停止）");
 
     let progress = ProgressSender::new();
-    let renderer = ProgressRenderer::spawn(progress.subscribe());
+    let renderer = ProgressRenderer::spawn(progress.subscribe(), render::Role::Send);
 
     // 循环接受连接，而不是只接一次：接收端可能因为断网、崩溃或用户
     // 主动中断而断开，之后它会重新扫码连接以续传。如果主机只 accept
@@ -248,7 +248,7 @@ async fn receive(
     println!("正在连接主机 {} ……", payload.name);
 
     let progress = ProgressSender::new();
-    let renderer = ProgressRenderer::spawn(progress.subscribe());
+    let renderer = ProgressRenderer::spawn(progress.subscribe(), render::Role::Receive);
 
     // Ctrl+C 走"优雅停止"而不是直接被杀：已收的部分会保留，下次还能续传。
     // 直接杀进程会留下过期的检查点，下次要么整段重传，要么更糟——
