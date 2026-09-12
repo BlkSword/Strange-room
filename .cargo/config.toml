@@ -1,0 +1,19 @@
+[source.crates-io]
+replace-with = "tuna-sparse"
+
+[source.tuna-sparse]
+registry = "sparse+https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/"
+
+[http]
+proxy = ""
+check-revoke = false
+
+[https]
+proxy = ""
+
+[net]
+retry = 5
+git-fetch-with-cli = true
+
+[build]
+jobs = 8
