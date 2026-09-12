@@ -34,3 +34,8 @@ blake3 = "1.8.7"
 hex = "0.4.3"
 tempfile = "3.27.0"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time"] }
+
+# 只有 Unix 需要：posix_fallocate / statvfs 用来真正预留磁盘空间
+# 并取回可用空间。Windows 侧走 set_len + SetEndOfFile，不需要额外依赖。
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

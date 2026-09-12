@@ -6,7 +6,7 @@
 //! 3. 永远先写 `.part`，校验通过后再原子改名，用户看不到半个文件。
 
 use std::fs;
-use std::io::{self, Seek, SeekFrom, Write};
+use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use crate::error::{Error, Result};
@@ -87,15 +87,20 @@ pub fn join_checked(base: &Path, rel: &Path) -> PathBuf {
 
 /// 预留 `size` 字节的落盘空间，并创建父目录。
 ///
-/// 策略：创建文件并把长度扩展到 `size`。扩展长度不会真的写数据，但会让
-/// 文件系统立刻为后续写入分配簇，避免"传到 90% 才发现磁盘满"。
-/// 这也是跨平台唯一不需要特权 API 的做法。
+/// **必须真的向文件系统申请空间**，而不是只把文件长度改大——这是这一层存在的
+/// 全部意义，也是跨平台时最容易悄悄失效的地方：
+///
+/// - **Linux/Unix**：`set_len` 或"seek 到末尾写一个字节"只会产生**空洞**
+///   （稀疏文件）。`ls -l` 看着有那么大，实际一个盘块都没占——于是"磁盘满"
+///   会拖到传到 90% 才爆出来，正好是这里要防的那种失败。所以用
+///   `posix_fallocate`：真申请，空间不够立刻拿到 ENOSPC。
+/// - **Windows**：`set_len`（SetEndOfFile）会让 NTFS 真的分配簇，可以直接用。
 pub fn preallocate(path: &Path, size: u64) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
     }
 
-    let mut file = fs::OpenOptions::new()
+    let file = fs::OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(false)
@@ -103,19 +108,70 @@ pub fn preallocate(path: &Path, size: u64) -> Result<()> {
         .map_err(|e| Error::io(path, e))?;
 
     let current = file.metadata().map_err(|e| Error::io(path, e))?.len();
-    if current >= size {
-        return Ok(());
-    }
-    if size == 0 {
+    if current >= size || size == 0 {
         return Ok(());
     }
 
-    // 扩展文件长度：磁盘满会在这里立刻暴露，而不是传到一半才炸
-    file.seek(SeekFrom::Start(size - 1))
-        .map_err(|e| Error::io(path, e))?;
-    file.write_all(&[0u8]).map_err(|e| Error::io(path, e))?;
-    file.flush().map_err(|e| Error::io(path, e))?;
-    Ok(())
+    reserve_space(&file, path, size)
+}
+
+#[cfg(unix)]
+fn reserve_space(file: &fs::File, path: &Path, size: u64) -> Result<()> {
+    use std::os::unix::io::AsRawFd;
+
+    // SAFETY: fd 在调用期间保持有效（file 的生命周期覆盖整个函数体）
+    let rc = unsafe { libc::posix_fallocate(file.as_raw_fd(), 0, size as libc::off_t) };
+    match rc {
+        0 => Ok(()),
+        // 文件系统不支持 fallocate（部分网络盘、旧内核）：退回改长度。
+        // 会退化成稀疏文件，但至少长度语义正确，而不是直接让用户传不了。
+        libc::EOPNOTSUPP | libc::ENOSYS => file.set_len(size).map_err(|e| Error::io(path, e)),
+        libc::ENOSPC => Err(Error::InsufficientSpace {
+            need: size,
+            available: available_space(path).unwrap_or(0),
+        }),
+        other => Err(Error::io(path, std::io::Error::from_raw_os_error(other))),
+    }
+}
+
+#[cfg(not(unix))]
+fn reserve_space(file: &fs::File, path: &Path, size: u64) -> Result<()> {
+    // Windows：SetEndOfFile 会让 NTFS 分配簇，等价于真预分配
+    file.set_len(size).map_err(|e| Error::io(path, e))
+}
+
+/// 目标路径所在文件系统的可用字节数。
+///
+/// 用途是把"空间不足"报成具体数字（"还需要 2.4 GB，只剩 800 MB"），
+/// 而不是让用户对着"磁盘错误"自己猜。平台拿不到时返回 None，调用方
+/// 需要容忍——宁可少一句提示，也不要因此让传输失败。
+#[cfg(unix)]
+pub fn available_space(path: &Path) -> Option<u64> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    // 目标目录可能还没建，往上找第一个存在的祖先
+    let mut probe = path;
+    loop {
+        if probe.exists() {
+            break;
+        }
+        probe = probe.parent()?;
+    }
+    let c = CString::new(probe.as_os_str().as_bytes()).ok()?;
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: c 是合法的 NUL 结尾路径，st 是有效的可写指针
+    if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
+        return None;
+    }
+    Some(st.f_bavail as u64 * st.f_frsize as u64)
+}
+
+#[cfg(not(unix))]
+pub fn available_space(_path: &Path) -> Option<u64> {
+    // Windows 上要拿这个数得调 GetDiskFreeSpaceExW；目前没接，
+    // 所以"空间不足"只会给出需要的字节数，不给剩余量。
+    None
 }
 
 /// 原子改名：`from` → `to`。目标已存在时先移除。
