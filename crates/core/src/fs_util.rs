@@ -214,6 +214,32 @@ pub fn part_path(final_path: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
+/// 把文件的前 `len` 字节喂给一个**已有的**哈希器。
+///
+/// 用途：续传时先把磁盘上已有的前缀喂进去，之后的检查点就能直接对这个哈希器
+/// 取快照，而不必每次都从头重算。这一点很关键——见下面 `hash_prefix` 的警告。
+pub fn feed_prefix(hasher: &mut blake3::Hasher, path: &Path, len: u64) -> Result<()> {
+    if len == 0 {
+        return Ok(());
+    }
+    let mut file = fs::File::open(path).map_err(|e| Error::io(path, e))?;
+    let mut remaining = len;
+    let mut buf = vec![0u8; 256 * 1024];
+    while remaining > 0 {
+        let want = buf.len().min(remaining as usize);
+        let n = io::Read::read(&mut file, &mut buf[..want]).map_err(|e| Error::io(path, e))?;
+        if n == 0 {
+            return Err(Error::protocol(format!(
+                "{} 的实际长度比记录短，无法续传",
+                path.display()
+            )));
+        }
+        hasher.update(&buf[..n]);
+        remaining -= n as u64;
+    }
+    Ok(())
+}
+
 /// 流式哈希文件，不把文件读进内存。发送前算校验和、接收后验校验和都用它。
 pub fn hash_file(path: &Path) -> Result<blake3::Hash> {
     let mut hasher = blake3::Hasher::new();

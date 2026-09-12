@@ -896,17 +896,25 @@ async fn receive_one_file(
             .map_err(|e| Error::io(part, e))?;
     }
 
+    // 边收边算的滚动哈希器；检查点只对它取快照，不再从头重算。
+    //
+    // 这里曾经写的是 ResumeState::with_prefix_hash(part, written)：每次检查点
+    // 都把整段前缀重读重算一遍。检查点每 8MB 一次，总开销就是
+    // 8+16+…+n = O(n²)——512MB 的传输要哈希约 16GB 数据，把吞吐死死压在
+    // 50MB/s 上下，而且从耗时归因上完全看不出是哈希干的。
+    let mut hasher = blake3::Hasher::new();
+    if start_offset > 0 {
+        // 续传：先把磁盘上已有的前缀喂进去。这一步是 O(起点)，每个文件只做一次。
+        fs_util::feed_prefix(&mut hasher, part, start_offset)?;
+    }
+
     state.upsert(PartialFile {
         relative_path: relative_path.to_string(),
         file_id: file_id.to_string(),
         total_size,
         partial: start_offset,
-        // 起点来自对端协商，其可信性已由 resume_offset 的前缀校验保证；
-        // 优先复用状态里已有的哈希，拿不到就按磁盘内容重算
-        partial_hash: state
-            .get(file_id)
-            .and_then(|e| e.partial_hash.clone())
-            .or_else(|| ResumeState::with_prefix_hash(part, start_offset)),
+        // 起点来自对端协商，其可信性已由 resume_offset 的前缀校验保证
+        partial_hash: Some(hex::encode(hasher.finalize().as_bytes())),
         completed: false,
     });
     // 检查点写失败不该中断传输：丢掉的只是"下次能少传一点"这个优化，
@@ -958,6 +966,7 @@ async fn receive_one_file(
                 file.write_all(&frame.payload)
                     .await
                     .map_err(|e| Error::io(part, e))?;
+                hasher.update(&frame.payload);
                 written += frame.payload.len() as u64;
                 progress.send(ProgressEvent::ChunkProgress {
                     file_id: file_id.to_string(),
@@ -973,7 +982,7 @@ async fn receive_one_file(
                         relative_path: relative_path.to_string(),
                         file_id: file_id.to_string(),
                         total_size,
-                        partial_hash: ResumeState::with_prefix_hash(part, written),
+                        partial_hash: Some(hex::encode(hasher.finalize().as_bytes())),
                         partial: written,
                         completed: false,
                     });
@@ -1011,7 +1020,7 @@ async fn receive_one_file(
         state.upsert(PartialFile {
             relative_path: relative_path.to_string(),
             file_id: file_id.to_string(),
-            partial_hash: ResumeState::with_prefix_hash(part, written),
+            partial_hash: Some(hex::encode(hasher.finalize().as_bytes())),
             total_size,
             partial: written,
             completed: false,

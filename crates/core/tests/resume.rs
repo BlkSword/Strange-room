@@ -309,6 +309,22 @@ async fn cancel_stops_promptly_and_keeps_progress_for_resume() {
     let entry = state.get(&file_id).expect("取消后必须留下检查点");
     assert!(!entry.completed, "取消时文件不该被标记为完成");
 
+    // 检查点里的 `partial_hash` 必须**正好等于磁盘上前 `partial` 字节的 BLAKE3**。
+    //
+    // 续传能"只补传缺的那一段"，全靠这个等式成立：接收端下次会重算前缀哈希，
+    // 和检查点里记的对得上才肯从半路接着收。这里曾经出过一次严重的性能事故——
+    // 每个检查点都把整段前缀重读重算一遍（O(n²)，512MB 的文件要哈希 16GB 数据，
+    // 吞吐被压到 50MB/s）。算法改成"边收边算、检查点只取快照"之后，这个等式
+    // 就是正确性的关节：快照错一位，续传要么整段重传，要么更糟。
+    let part_bytes = std::fs::read(&part).expect("读取 .part");
+    let mut prefix = blake3::Hasher::new();
+    prefix.update(&part_bytes[..entry.partial as usize]);
+    assert_eq!(
+        entry.partial_hash.as_deref(),
+        Some(prefix.finalize().to_string().as_str()),
+        "检查点哈希必须等于磁盘前缀的 BLAKE3，否则下次续传会被判定为不可信"
+    );
+
     // 拿主机的这份任务收掉（它会因为对端断开而结束）
     let _ = tokio::time::timeout(std::time::Duration::from_secs(20), host).await;
 
