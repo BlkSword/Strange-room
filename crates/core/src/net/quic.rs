@@ -38,6 +38,38 @@ pub const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// 局域网内数据是连续流动的，十几秒没有任何流量即可判定对端已消失。
 const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
 
+/// UDP 套接字的收发缓冲区大小。
+///
+/// **为什么必须显式设置**：Windows 的 UDP 默认缓冲区只有 64 KB，而 QUIC 允许的
+/// 在途数据量是流窗口（默认 1.25 MB）级别。缓冲区一满，内核**直接丢包**，
+/// 于是进入"丢包 → 拥塞窗口缩回 → 重传"的循环。实测：即使在毫无真实损耗的
+/// 回环上，默认缓冲区下也有 1.8% 的丢包、17 次拥塞事件，吞吐被死死按在
+/// 160 MB/s；丢包还会在接收端堆积出大量碎片，超过 quinn 的 1024 段上限后
+/// 连接会被判为 INTERNAL_ERROR 直接掐断（"too many gaps in stream buffer"）。
+///
+/// 4 MB 是折中：足够覆盖几兆的在途数据，又不会让每台设备付出太大内存。
+/// 高带宽链路（万兆局域网）下如果还不够，可以再调大。
+const UDP_SOCKET_BUFFER: usize = 4 * 1024 * 1024;
+
+/// 绑定一个收发缓冲区已调大的 UDP 套接字。
+///
+/// 与 `quinn::Endpoint::client` 内部做的事保持一致（IPv6 用双栈），只是多设了
+/// 缓冲区。设缓冲区失败不算致命：退回系统默认值，功能正常，只是慢一些。
+fn bind_udp(addr: SocketAddr) -> std::io::Result<std::net::UdpSocket> {
+    let socket = socket2::Socket::new(
+        socket2::Domain::for_address(addr),
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )?;
+    if addr.is_ipv6() {
+        let _ = socket.set_only_v6(false);
+    }
+    let _ = socket.set_recv_buffer_size(UDP_SOCKET_BUFFER);
+    let _ = socket.set_send_buffer_size(UDP_SOCKET_BUFFER);
+    socket.bind(&addr.into())?;
+    Ok(socket.into())
+}
+
 /// 构造带空闲超时的传输配置，主机与接收端共用。
 ///
 /// 只调空闲超时，**不动流控窗口**：默认窗口已经足够局域网吞吐，
@@ -124,8 +156,15 @@ impl HostSession {
         quinn_cfg.transport_config(transport_config());
 
         let bind: SocketAddr = format!("0.0.0.0:{}", opts.listen_port).parse().unwrap();
-        let endpoint = quinn::Endpoint::server(quinn_cfg, bind)
+        let sock = bind_udp(bind)
             .map_err(|e| Error::protocol(format!("无法监听 {bind}（{e}）。请检查端口是否被占用")))?;
+        let endpoint = quinn::Endpoint::new(
+            quinn::EndpointConfig::default(),
+            Some(quinn_cfg),
+            sock,
+            Arc::new(quinn::TokioRuntime),
+        )
+        .map_err(|e| Error::protocol(format!("无法监听 {bind}（{e}）。请检查端口是否被占用")))?;
         let port = endpoint
             .local_addr()
             .map_err(|e| Error::protocol(format!("获取本地端口失败: {e}")))?
@@ -557,8 +596,15 @@ impl Receiver {
                 ));
                 quinn_cfg.transport_config(transport_config());
 
-                let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().unwrap())
+                let sock = bind_udp("0.0.0.0:0".parse().unwrap())
                     .map_err(|e| Error::protocol(format!("创建本地 UDP 端点失败: {e}")))?;
+                let mut endpoint = quinn::Endpoint::new(
+                    quinn::EndpointConfig::default(),
+                    None,
+                    sock,
+                    Arc::new(quinn::TokioRuntime),
+                )
+                .map_err(|e| Error::protocol(format!("创建本地 UDP 端点失败: {e}")))?;
                 endpoint.set_default_client_config(quinn_cfg);
 
                 match endpoint.connect(addr, crate::identity::SERVER_NAME) {
