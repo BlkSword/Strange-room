@@ -172,7 +172,7 @@ sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appi
 ## 开发
 
 ```bash
-cargo test              # 内核 + CLI（默认成员），84 个用例
+cargo test              # 内核 + CLI（默认成员），87 个用例
 cargo test --workspace  # 连桌面端一起构建
 cargo run -p sr-desktop # 跑桌面端
 
@@ -182,8 +182,11 @@ cargo run --release --example bench -p strange-room-core -- 512
 ```
 
 测试里包含真实起两个 QUIC 端点互传文件的端到端用例，以及「中断后重连只补差额」、
-「不可信检查点必须整文件重传」、「指纹不符必须秒级失败」、「取消后必须还能续传」
-这类回归测试。
+「不可信检查点必须整文件重传」、「指纹不符必须秒级失败」、「取消后必须还能续传」、
+「一个文件写不进去不能连累其他文件」这类回归测试。
+
+写测试时的一个规矩：修 bug 之前先把"能复现它"的用例写出来，并且**确认它在修复前真的
+会失败**——否则那条测试只是个摆设。
 
 ## 项目状态
 
