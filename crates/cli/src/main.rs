@@ -289,13 +289,17 @@ async fn receive(
                 s.files_sent,
                 sr_core::net::quic::human_bytes(s.bytes_sent)
             );
+            println!("文件已保存到：{}", dest.display());
             if !s.failures.is_empty() {
                 println!("有 {} 个文件失败（其他文件不受影响）：", s.failures.len());
                 for (p, e) in &s.failures {
                     println!("  - {p}: {e}");
                 }
+                // 有文件没收到就必须以非零状态退出，否则脚本与自动化会把
+                // "半失败"当成成功——上面那句"接收完成"也容易让人看漏。
+                println!("已收到的部分保留在目标目录里；再运行一次同样的命令会接着传剩下的。");
+                anyhow::bail!("部分文件未能接收");
             }
-            println!("文件已保存到：{}", dest.display());
             Ok(())
         }
         Err(e) => Err(e.into()),
