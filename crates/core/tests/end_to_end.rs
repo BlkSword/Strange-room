@@ -104,6 +104,67 @@ async fn transfers_a_single_file_and_verifies_hash() {
     host.await.unwrap().unwrap();
 }
 
+/// 一个文件的目标路径写不进去时，**必须只跳过它，不能把整个会话带沟里**。
+///
+/// 这条用例守的是一个真实踩过的坑：接收端原来是在发完 OFFER 之后才建目录、
+/// 预分配，于是"目标目录里有个同名文件"这类问题会在主机已经开始推数据之后才暴露。
+/// 接收端记一笔失败接着协商下一个文件，可主机还在按自己的节奏推上一个文件的数据，
+/// 那些数据帧就被当成控制帧解析——单流会话直接失步，后面本来没问题的文件也一起失败。
+///
+/// 修法是把本地准备提到发 OFFER 之前（见 `prepare_target`）。所以这里断言两件事：
+/// 失败的那个文件被记下来，以及**同一个会话里另一个文件照常传完且内容正确**。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_blocked_destination_skips_that_file_without_breaking_the_session() {
+    common::isolated_env();
+    let (_src_guard, src) = tmp();
+    let (_dst_guard, dst) = tmp();
+
+    // 一份要正常传完的文件，一份注定写不进去的
+    let root = src.join("data");
+    let good = pseudo_random(1_500_000, 99);
+    write_file(&root.join("good/a.bin"), &good);
+    write_file(&root.join("blocked/b.bin"), &pseudo_random(200_000, 100));
+
+    // 目标目录里先放一个**文件**占住 blocked 这个位置：
+    // 接收端要建的是目录，必然失败（Windows 报 os error 183，Unix 报 NotADirectory）
+    std::fs::create_dir_all(dst.join("data")).unwrap();
+    write_file(&dst.join("data/blocked"), "占位".as_bytes());
+
+    let plan = plan_paths(std::slice::from_ref(&root)).unwrap();
+    assert_eq!(plan.files.len(), 2);
+
+    let session = start_host(plan).await;
+    let payload = local_payload(&session);
+    let host = spawn_host_task(session);
+
+    let summary = Receiver::run(
+        ReceiverOptions {
+            payload,
+            dest_dir: dst.clone(),
+            device_name: "r".into(),
+            continue_partial: true,
+            cancel: sr_core::CancelToken::new(),
+        },
+        &ProgressSender::new(),
+    )
+    .await
+    .expect("一个文件写不进去不该让整次接收报错返回");
+
+    assert_eq!(summary.failures.len(), 1, "应当恰好有一个文件失败：{:?}", summary.failures);
+    assert!(
+        summary.failures[0].0.contains("blocked"),
+        "失败名单应当是写不进去的那个文件：{:?}",
+        summary.failures
+    );
+    assert_eq!(summary.files_sent, 1, "另一个文件必须照常传完");
+
+    // 关键：没被牵连的那个文件内容必须完好
+    let got = std::fs::read(dst.join("data/good/a.bin")).expect("正常文件没收到");
+    assert_eq!(got, good, "受牵连的文件内容不一致——会话很可能失步了");
+
+    host.await.unwrap().unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn transfers_a_folder_preserving_structure() {
     common::isolated_env();

@@ -743,12 +743,12 @@ impl Receiver {
             // 重连后不重传已经收好的文件）
             let have = state.resume_offset(&entry.file_id, &part, entry.size);
             if have >= entry.size && entry.size > 0 {
-        // 已经从上次会话收完了？重新校验一遍再确认，不能只看状态文件
-        let part_hash_ok = match fs_util::hash_file(&part) {
-            Ok(h) => hex::encode(h.as_bytes()).eq_ignore_ascii_case(&entry.blake3),
-            Err(_) => false,
-        };
-        if part_hash_ok {
+                // 已经从上次会话收完了？重新校验一遍再确认，不能只看状态文件
+                let part_hash_ok = match fs_util::hash_file(&part) {
+                    Ok(h) => hex::encode(h.as_bytes()).eq_ignore_ascii_case(&entry.blake3),
+                    Err(_) => false,
+                };
+                if part_hash_ok {
                     fs_util::atomic_rename(&part, &target)?;
                     state.upsert(PartialFile {
                         relative_path: entry.relative_path.clone(),
@@ -768,6 +768,20 @@ impl Receiver {
                 }
                 // 校验没过：删掉重来
                 let _ = std::fs::remove_file(&part);
+            }
+
+            // 本地准备必须在**发 OFFER 之前**做完，理由见 prepare_target 的注释：
+            // 这一步一旦失败而又已经发过 OFFER，主机推来的数据就没人接，
+            // 整个单流会话会失步（后面所有文件都跟着完蛋）。
+            // 放在前面失败，最坏也只是"这个文件跳过"，会话继续。
+            if let Err(e) = prepare_target(&part, entry.size, have).await {
+                let msg = e.to_string();
+                progress.send(ProgressEvent::Warn(format!(
+                    "跳过 {}：{msg}",
+                    entry.relative_path
+                )));
+                summary.failures.push((entry.relative_path.clone(), msg));
+                continue;
             }
 
             let offer = FileOffer {
@@ -810,8 +824,21 @@ impl Receiver {
                     if matches!(e, Error::Cancelled) {
                         return Err(e);
                     }
+                    // 传一半才失败（磁盘写错、对端断开、校验不符……）必须**结束整次会话**，
+                    // 不能"记一笔失败，接着协商下一个文件"。
+                    //
+                    // 原因：主机此刻还在按自己的节奏推这个文件的数据，接收端如果跳去谈
+                    // 下一个文件，流上剩下的数据帧会被当成控制帧解析，单流会话就此失步
+                    // （实测报错是"期望续传确认（帧类型 3），实际收到帧类型 4"）。
+                    // 结束会话是安全的一侧：已收到的部分和检查点都留着，用户重跑一次
+                    // 就能从这个文件的断点续上，而不是留下一个静默错乱的状态。
                     let msg = e.to_string();
+                    progress.send(ProgressEvent::Warn(format!(
+                        "{} 中断：{msg}；已收到的部分已保留，重新运行可续传",
+                        entry.relative_path
+                    )));
                     summary.failures.push((entry.relative_path.clone(), msg.clone()));
+                    // 尽力通知主机（它此刻多半在写，看不到这条，但正常收尾时用得上）
                     let _ = write_frame(
                         &mut send,
                         &Frame::json(
@@ -824,7 +851,7 @@ impl Receiver {
                         )?,
                     )
                     .await;
-                    continue;
+                    return Err(e);
                 }
             };
 
@@ -881,6 +908,34 @@ impl Receiver {
     }
 }
 
+/// 接收一个文件之前的本地准备：建父目录、真预分配、查磁盘空间。
+///
+/// **必须在发 OFFER 之前调用。** 主机一旦收到 OFFER 就会一路把文件推过来，中途
+/// 不会听指挥；如果这里失败了而我们又已经发过 OFFER，主机推来的数据就没人接，
+/// 接收端接下来读到的会是数据帧、却被当成控制帧解析——整个会话失步，连后面
+/// 本来没问题的文件也一起完蛋。放在发 OFFER 之前失败，就只是"这个文件跳过"。
+///
+/// `start_offset == 0` 时先归零再分配：这样上次留下的、比目标更长的残缺文件
+/// 不会把尾巴带进最终结果。
+async fn prepare_target(part: &Path, total_size: u64, start_offset: u64) -> Result<()> {
+    let part = part.to_path_buf();
+    // 预分配是阻塞式系统调用（而且可能要真的分配几个 GB），扔进阻塞线程池，
+    // 不要让它在 async 运行时上卡住 QUIC 的定时器。
+    tokio::task::spawn_blocking(move || {
+        if start_offset == 0 {
+            if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&part) {
+                let _ = f.set_len(0);
+            }
+        }
+        // 空间不够会返回 InsufficientSpace（带"还需要/只剩"），
+        // 而不是等传到 90% 才炸
+        fs_util::preallocate(&part, total_size)
+    })
+    .await
+    .map_err(|e| Error::protocol(format!("预分配任务失败：{e}")))??;
+    Ok(())
+}
+
 /// 接收单个文件：协商好的偏移开始，流式写 `.part`，每块之后写检查点。
 #[allow(clippy::too_many_arguments)]
 async fn receive_one_file(
@@ -904,15 +959,10 @@ async fn receive_one_file(
         resumed_from: start_offset,
     });
 
-    // 预分配：磁盘满要在开始传之前就暴露，而不是传到 90%
-    // 父目录必须在这里创建：发送端的相对路径可能带目录（如 proj/sub/a.bin），
-    // 而此前只有 dest_dir 被创建过。漏掉这一步会报 os error 3（找不到路径），
-    // 而且它会被当成"单文件失败"跳过，进而让整个会话的帧收发错位。
-    if let Some(parent) = part.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| Error::io(parent, e))?;
-    }
+    // 本地准备（建父目录、真预分配、空间检查）在上面发 OFFER 之前已经做过一次，
+    // 这里再调一遍是兜底：重复调用是幂等的（`preallocate` 见到长度已经够就直接返回）。
+    // 这里用的是对端 ACK 里的 start_offset，所以"主机要求从 0 重传"也能正确截断。
+    prepare_target(part, total_size, start_offset).await?;
 
     let mut file = tokio::fs::OpenOptions::new()
         .create(true)
@@ -921,26 +971,9 @@ async fn receive_one_file(
         .open(part)
         .await
         .map_err(|e| Error::io(part, e))?;
-
-    {
-        let target_len = total_size;
-        let meta_len = file.metadata().await.map_err(|e| Error::io(part, e))?.len();
-        if meta_len < target_len {
-            file.set_len(target_len)
-                .await
-                .map_err(|e| Error::io(part, e))?;
-        }
-        // 从 0 重传时先把长度归零再展开，确保没有上次留下的尾巴
-        if start_offset == 0 {
-            file.set_len(0).await.map_err(|e| Error::io(part, e))?;
-            file.set_len(total_size)
-                .await
-                .map_err(|e| Error::io(part, e))?;
-        }
-        file.seek(std::io::SeekFrom::Start(start_offset))
-            .await
-            .map_err(|e| Error::io(part, e))?;
-    }
+    file.seek(std::io::SeekFrom::Start(start_offset))
+        .await
+        .map_err(|e| Error::io(part, e))?;
 
     // 边收边算的滚动哈希器；检查点只对它取快照，不再从头重算。
     //
