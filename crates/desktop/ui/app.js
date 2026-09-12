@@ -131,6 +131,24 @@ $("start-receive").onclick = async () => {
   }
 };
 
+// 诊断网络：连不上时先跑这个，而不是让用户自己猜
+$("diagnose").onclick = async () => {
+  const payload = $("payload-input").value.trim();
+  if (!payload) { $("receive-hint").textContent = "请先粘贴连接串，再诊断"; return; }
+  const btn = $("diagnose");
+  btn.disabled = true;
+  btn.textContent = "自检中…";
+  try {
+    const report = await invoke("diagnose_payload", { payload });
+    showResult("网络自检", report, "");
+  } catch (e) {
+    showResult("自检没能完成", String(e), "请检查连接串是否完整。");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "诊断网络";
+  }
+};
+
 // ── 传输中的进度显示 ──────────────────────────────────────
 let startedAt = 0;
 let lastDone = 0;

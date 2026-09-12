@@ -125,3 +125,6 @@ button.ghost { border-color: transparent; color: var(--ink-soft); }
 .note.warn { color: #8a6d1f; }
 .note.error { color: var(--danger); }
 .hidden { display: none !important; }
+
+/* 自检报告是多行文本，需要保留换行才读得懂 */
+#result-body { white-space: pre-wrap; line-height: 1.75; }

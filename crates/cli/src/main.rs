@@ -76,6 +76,12 @@ enum Command {
         #[arg(long, default_value_t = false)]
         no_resume: bool,
     },
+
+    /// 网络自检：连不上时用它判断问题出在哪（只发握手，不传输任何文件）
+    Diagnose {
+        /// 二维码里的连接串（srx1: 开头），由主机提供
+        payload: String,
+    },
 }
 
 fn device_name() -> String {
@@ -126,6 +132,7 @@ async fn run(cli: Cli) -> Result<()> {
             name,
             no_resume,
         } => receive(payload, to, name, no_resume).await,
+        Command::Diagnose { payload } => diagnose(payload).await,
     }
 }
 
@@ -211,6 +218,19 @@ async fn send(
         }
         Err(e) => Err(e.into()),
     }
+}
+
+/// 网络自检。
+///
+/// 存在的理由：局域网产品最常见的失败不是代码 bug，而是环境（不在同一 WiFi、
+/// 访客网络开了 AP 隔离、防火墙拦了 UDP）。这些代码解决不了，只能给出
+/// 可操作的指引——否则用户只看到一句"连接超时"就放弃了。
+async fn diagnose(payload: String) -> Result<()> {
+    println!("正在自检……会对二维码里的每个地址发一次握手，不传输任何文件
+");
+    let d = sr_core::diag::diagnose_str(&payload).await.context("自检失败")?;
+    print!("{}", d.render());
+    Ok(())
 }
 
 async fn receive(

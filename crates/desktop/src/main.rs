@@ -309,6 +309,19 @@ async fn start_receive(
     Ok(())
 }
 
+/// 网络自检：连不上时用它判断问题出在哪。
+///
+/// 返回的是给用户直接看的整段报告（结论 + 按可能性排序的建议）。
+/// 放在 Rust 侧渲染，是为了让 CLI 与界面说同样的话——
+/// 排查建议一旦两处不一致，用户就会更困惑。
+#[tauri::command]
+async fn diagnose_payload(payload: String) -> Result<String, String> {
+    let d = sr_core::diag::diagnose_str(&payload)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(d.render())
+}
+
 /// 停止正在进行的接收。
 ///
 /// 走的是内核的协作式取消，不是杀进程：循环会在下一个安全检查点退出，
@@ -352,6 +365,7 @@ fn main() {
             start_receive,
             cancel_share,
             cancel_transfer,
+            diagnose_payload,
             inspect_payload
         ])
         .run(tauri::generate_context!())

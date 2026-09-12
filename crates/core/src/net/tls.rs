@@ -303,3 +303,16 @@ mod verifier_tests {
         assert!(!v.supported_verify_schemes().is_empty());
     }
 }
+
+/// 判断一个 QUIC 连接错误是否源于"对端证书不可信"。
+///
+/// 用在这里的场景是自检：区分"有东西在响应但不是我们要的主机"和
+/// "根本没响应"。这两种情况的排查方向完全相反——前者是二维码过期或被冒充，
+/// 后者是网络/防火墙问题。
+pub fn is_certificate_error(e: &quinn::ConnectionError) -> bool {
+    let text = format!("{e}");
+    text.contains("certificate")
+        || text.contains("证书")
+        || text.contains("fingerprint")
+        || text.contains("指纹")
+}

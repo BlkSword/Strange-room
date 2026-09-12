@@ -310,3 +310,63 @@ async fn rejects_a_stale_session_id() {
         .count();
     assert_eq!(finished, 0, "过期会话被拒后不应落盘任何文件");
 }
+
+/// 自检：面对一台**真的在运行**的主机，必须判定为可达。
+///
+/// 这条用例的价值在于：自检的探测逻辑和真正连接时用的是同一套握手，
+/// 所以它顺带证明了"自检说能连 = 真能连"，而不是两套逻辑各说各话。
+#[tokio::test(flavor = "multi_thread")]
+async fn diagnostics_reports_reachable_for_a_live_host() {
+    common::isolated_env();
+    let (_src_guard, src) = tmp();
+    let file = src.join("x.bin");
+    write_file(&file, b"hello");
+    let plan = plan_paths(&[file]).unwrap();
+
+    let session = start_host(plan).await;
+    let payload = local_payload(&session);
+    let host = spawn_host_task(session);
+
+    let d = sr_core::diag::diagnose(&payload).await.expect("自检本身不该失败");
+    assert_eq!(
+        d.verdict,
+        sr_core::Verdict::Reachable,
+        "对运行中的主机自检应判定可达，实际 {:?}：{}",
+        d.verdict,
+        d.summary
+    );
+    assert!(
+        d.probes.iter().any(|p| p.outcome == sr_core::ProbeOutcome::Reachable),
+        "至少要有一个地址探测成功"
+    );
+    let _ = tokio::time::timeout(Duration::from_secs(20), host).await;
+}
+
+/// 自检：面对一个不存在的地址，必须给出"不是可达"的结论，并且**附带建议**。
+///
+/// 只断言"不是 Reachable"而不是具体哪一种：不同系统对"往没人听的端口发 UDP"
+/// 的反应不一样（有的回 ICMP 端口不可达，有的直接丢掉），
+/// 结论落点会不同。这里关心的是"别把坏的报成好的"以及"要说人话"。
+#[tokio::test(flavor = "multi_thread")]
+async fn diagnostics_on_a_dead_address_is_not_optimistic() {
+    common::isolated_env();
+    let payload = sr_core::QrPayload::new(
+        "no-such-session",
+        "不存在的主机",
+        "f".repeat(sr_core::identity::FINGERPRINT_LEN * 2),
+        vec![sr_core::AddressHint {
+            host: "127.0.0.1".to_string(),
+            port: 1,
+        }],
+    );
+
+    let d = sr_core::diag::diagnose(&payload).await.expect("自检本身不该失败");
+    assert_ne!(d.verdict, sr_core::Verdict::Reachable, "不该把不通的报成可达");
+    assert!(
+        !d.probes.is_empty() && d.probes.iter().all(|p| p.outcome != sr_core::ProbeOutcome::Reachable),
+        "不该有地址被判为可达"
+    );
+    assert!(!d.advice.is_empty(), "结论之外必须给出可操作的建议");
+    let text = d.render();
+    assert!(text.contains("结论"), "报告应包含结论段");
+}
