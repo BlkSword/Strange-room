@@ -1,0 +1,17 @@
+[package]
+name = "sr-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Strange Room 桌面端（Tauri v2）"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+qrcode = { version = "0.14.1", features = ["svg"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sr_core = { path = "../core", package = "strange-room-core" }
+tauri = "2.11.5"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync"] }

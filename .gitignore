@@ -23,3 +23,6 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# ── Tauri 构建时生成的中间产物 ────────────────────────────
+crates/desktop/gen/

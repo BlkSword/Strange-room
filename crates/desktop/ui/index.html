@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Strange Room</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>Strange Room</h1>
+    <span class="sub">同一张桌子上的共享</span>
+  </header>
+
+  <!-- ① 主屏：选文件开始分享，或粘贴连接串接收 -->
+  <section id="screen-home" class="screen active">
+    <div id="drop">
+      <div><strong>把文件或文件夹拖到这里</strong></div>
+      <div>也可以把路径粘贴到下面</div>
+    </div>
+
+    <div class="row">
+      <input id="path-input" class="grow" type="text"
+             placeholder="粘贴文件或文件夹路径，回车添加" />
+      <button id="add-path">添加</button>
+    </div>
+
+    <ul id="paths" class="paths"></ul>
+
+    <div class="row">
+      <button id="start-share" class="primary grow" disabled>开始分享</button>
+      <button id="clear-paths" class="ghost">清空</button>
+    </div>
+
+    <div class="panel">
+      <label class="field">收到别人分享时，把连接串粘贴到这里
+        <input id="payload-input" type="text" placeholder="srx1:…" />
+      </label>
+      <label class="field" style="margin-top:8px">保存到哪个目录
+        <input id="dest-input" type="text" value="." />
+      </label>
+      <div class="row" style="margin-top:10px">
+        <button id="start-receive" class="primary grow">接收文件</button>
+      </div>
+      <div id="receive-hint" class="note" style="margin-top:8px"></div>
+    </div>
+  </section>
+
+  <!-- ② 等待接收：二维码 + 地址 -->
+  <section id="screen-share" class="screen">
+    <div class="panel">
+      <div class="qr" id="qr"></div>
+      <div class="meta">
+        <span class="big" id="share-summary"></span>
+        <span>让旁边的人用相机扫码，或在他的客户端里粘贴连接串</span>
+      </div>
+      <div class="row" style="justify-content:center;margin-top:10px">
+        <button id="copy-payload">复制连接串</button>
+      </div>
+      <div class="note" id="share-addrs" style="margin-top:10px;text-align:center"></div>
+    </div>
+    <div class="row">
+      <button id="cancel-share" class="ghost grow">停止分享</button>
+    </div>
+  </section>
+
+  <!-- ③ 传输中：进度 -->
+  <section id="screen-transfer" class="screen">
+    <div class="panel">
+      <div class="note" id="peer"></div>
+      <div class="file-name" id="cur-file"></div>
+      <div class="bar"><i id="file-bar"></i></div>
+      <div class="stats">
+        <span id="file-stats"></span>
+        <span id="file-eta"></span>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="stats" style="margin:0 0 6px"><span>整体</span><span id="overall-stats"></span></div>
+      <div class="bar overall"><i id="overall-bar"></i></div>
+    </div>
+    <div class="row">
+      <button id="back-from-transfer" class="ghost grow">返回</button>
+    </div>
+  </section>
+
+  <!-- ④ 结果 -->
+  <section id="screen-result" class="screen">
+    <div class="panel" style="flex:1;display:flex;flex-direction:column;justify-content:center;gap:10px">
+      <div id="result-title" class="meta"><span class="big"></span></div>
+      <div id="result-body" class="note"></div>
+      <div id="result-hint" class="note warn"></div>
+    </div>
+    <div class="row">
+      <button id="back-home" class="primary grow">回到首页</button>
+    </div>
+  </section>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
