@@ -75,6 +75,41 @@ impl ProgressRenderer {
     }
 }
 
+/// 总体进度模型：把事件流折算成"总体已完成字节"。
+///
+/// 为什么单独抽成纯结构：这里出过一个真实的显示 bug——某个文件传完时它的进度条
+/// 被从表里删掉，"各文件进度之和"就少了一份，于是多文件传输时总体进度条会**倒退**，
+/// 按这个数算出来的速度还会变成负数。抽出来才能被单元测试按住。
+#[derive(Default)]
+struct ProgressModel {
+    /// 已经传完的文件累计字节
+    finished_bytes: u64,
+    /// 正在传的文件：file_id → 当前已传字节
+    active: HashMap<String, u64>,
+}
+
+impl ProgressModel {
+    /// 文件开始（可能是续传，起点不为 0）
+    fn start(&mut self, file_id: &str, resumed_from: u64) {
+        self.active.insert(file_id.to_string(), resumed_from);
+    }
+
+    fn advance(&mut self, file_id: &str, bytes_done: u64) {
+        self.active.insert(file_id.to_string(), bytes_done);
+    }
+
+    /// 文件传完：把它的字节**留在**总数里，而不是跟着进度条一起消失
+    fn finish(&mut self, file_id: &str) {
+        if let Some(n) = self.active.remove(file_id) {
+            self.finished_bytes += n;
+        }
+    }
+
+    fn done(&self) -> u64 {
+        self.finished_bytes + self.active.values().sum::<u64>()
+    }
+}
+
 fn render_loop(mut rx: tokio::sync::broadcast::Receiver<ProgressEvent>) {
     let multi = MultiProgress::new();
     let overall = multi.add(ProgressBar::new(0));
@@ -86,6 +121,7 @@ fn render_loop(mut rx: tokio::sync::broadcast::Receiver<ProgressEvent>) {
     overall.enable_steady_tick(Duration::from_millis(200));
 
     let mut files: HashMap<String, ProgressBar> = HashMap::new();
+    let mut model = ProgressModel::default();
     let mut started = Instant::now();
     let mut total_bytes = 0u64;
 
@@ -104,6 +140,7 @@ fn render_loop(mut rx: tokio::sync::broadcast::Receiver<ProgressEvent>) {
                 total_bytes: tb,
             } => {
                 total_bytes = tb;
+                model = ProgressModel::default();
                 started = Instant::now();
                 multi.suspend(|| println!("已连接到 {peer}，开始接收 {total_files} 个文件"));
                 overall.set_length(tb);
@@ -127,6 +164,7 @@ fn render_loop(mut rx: tokio::sync::broadcast::Receiver<ProgressEvent>) {
                 }
                 bar.set_message(label);
                 bar.set_position(resumed_from);
+                model.start(&file_id, resumed_from);
                 files.insert(file_id, bar);
             }
             ProgressEvent::ChunkProgress {
@@ -138,15 +176,22 @@ fn render_loop(mut rx: tokio::sync::broadcast::Receiver<ProgressEvent>) {
                     bar.set_length(bytes_total);
                     bar.set_position(bytes_done);
                 }
-                // 总体进度 = 各文件当前进度之和
-                let done: u64 = files.values().map(|b| b.position()).sum();
+                model.advance(&file_id, bytes_done);
+                let done = model.done();
                 overall.set_position(done);
-                match eta_seconds(done, total_bytes, started.elapsed().as_secs_f64()) {
-                    Some(eta) => overall.set_message(format!("剩 {:.0}s", eta)),
-                    None => overall.set_message("估算中…"),
+                // 速度取"本次会话的平均值"：瞬时速度在终端里跳得厉害，
+                // 平均值既稳定又和下面的 ETA 用的是同一个口径。
+                let elapsed = started.elapsed().as_secs_f64();
+                let rate = if elapsed > 0.0 { done as f64 / elapsed } else { 0.0 };
+                match eta_seconds(done, total_bytes, elapsed) {
+                    Some(eta) if rate >= 1024.0 => {
+                        overall.set_message(format!("{}/s · 剩 {:.0}s", human(rate as u64), eta))
+                    }
+                    _ => overall.set_message("估算中…"),
                 }
             }
             ProgressEvent::FileFinished { file_id, .. } => {
+                model.finish(&file_id);
                 if let Some(bar) = files.remove(&file_id) {
                     bar.finish_and_clear();
                 }
@@ -196,6 +241,32 @@ pub fn overall_percent(done: u64, total: u64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overall_progress_does_not_go_backwards_when_a_file_finishes() {
+        let mut m = ProgressModel::default();
+        m.start("a", 0);
+        m.advance("a", 100);
+        m.start("b", 0);
+        m.advance("b", 30);
+        assert_eq!(m.done(), 130);
+        // 传完一个：进度条会被移除，但字节必须留在总体进度里
+        m.finish("a");
+        assert_eq!(m.done(), 130, "文件传完后它的字节必须继续计入总体进度");
+        m.advance("b", 50);
+        assert_eq!(m.done(), 150);
+    }
+
+    #[test]
+    fn resumed_files_count_from_their_offset() {
+        let mut m = ProgressModel::default();
+        m.start("a", 700); // 续传：起点不是 0
+        assert_eq!(m.done(), 700);
+        m.advance("a", 1000);
+        assert_eq!(m.done(), 1000);
+        m.finish("a");
+        assert_eq!(m.done(), 1000);
+    }
 
     #[test]
     fn human_formats_units() {
