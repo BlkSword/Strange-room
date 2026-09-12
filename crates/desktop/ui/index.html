@@ -26,6 +26,11 @@
       <button id="add-path">添加</button>
     </div>
 
+    <div class="row">
+      <button id="pick-files" class="grow">选择文件…</button>
+      <button id="pick-folder" class="grow">选择文件夹…</button>
+    </div>
+
     <ul id="paths" class="paths"></ul>
 
     <div class="row">
@@ -40,6 +45,9 @@
       <label class="field" style="margin-top:8px">保存到哪个目录
         <input id="dest-input" type="text" value="." />
       </label>
+      <div class="row" style="margin-top:8px">
+        <button id="pick-dest" class="grow">选择保存目录…</button>
+      </div>
       <div class="row" style="margin-top:10px">
         <button id="start-receive" class="primary grow">接收文件</button>
         <button id="diagnose" title="连不上时点这里">诊断网络</button>

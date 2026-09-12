@@ -20,6 +20,7 @@ use sr_core::net::quic::{
 };
 use sr_core::progress::{ProgressEvent, ProgressSender};
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_dialog::DialogExt;
 
 /// 前后端唯一的事件通道。
 const EVT: &str = "transfer";
@@ -309,6 +310,44 @@ async fn start_receive(
     Ok(())
 }
 
+/// 打开系统文件/文件夹选择器。
+///
+/// `kind`：`"files"` 选多个文件，`"folder"` 选一个文件夹。
+///
+/// 为什么"能选"很重要：让用户手动打字输入路径，等于把最容易出错的一步
+/// 交给用户自己扛（Windows 路径里的反斜杠、中文、长路径都很容易打错），
+/// 而错一次就会得到"路径不存在"，用户不知道是自己打错了还是软件坏了。
+///
+/// 保留"粘贴路径"这条退路，是因为某些环境（远程桌面、受限权限）系统对话框
+/// 可能打不开，那时用户还不至于完全没法用。
+#[tauri::command]
+async fn pick_paths(app: AppHandle, kind: String) -> Result<Vec<String>, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel::<Vec<String>>();
+
+    if kind == "folder" {
+        app.dialog().file().pick_folder(move |picked| {
+            let out = picked
+                .and_then(|f| f.into_path().ok())
+                .map(|pb| vec![pb.display().to_string()])
+                .unwrap_or_default();
+            let _ = tx.send(out);
+        });
+    } else {
+        app.dialog().file().pick_files(move |picked| {
+            let out = picked
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|f| f.into_path().ok())
+                .map(|pb| pb.display().to_string())
+                .collect();
+            let _ = tx.send(out);
+        });
+    }
+
+    rx.await
+        .map_err(|_| "选择器没有返回结果（系统对话框可能不可用，请改用粘贴路径）".to_string())
+}
+
 /// 网络自检：连不上时用它判断问题出在哪。
 ///
 /// 返回的是给用户直接看的整段报告（结论 + 按可能性排序的建议）。
@@ -356,6 +395,7 @@ fn inspect_payload(payload: String) -> Result<serde_json::Value, String> {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             app.manage(AppState::default());
             Ok(())
@@ -366,6 +406,7 @@ fn main() {
             cancel_share,
             cancel_transfer,
             diagnose_payload,
+            pick_paths,
             inspect_payload
         ])
         .run(tauri::generate_context!())

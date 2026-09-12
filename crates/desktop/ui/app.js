@@ -59,6 +59,26 @@ $("path-input").addEventListener("keydown", (e) => {
 });
 $("clear-paths").onclick = () => { paths = []; renderPaths(); };
 
+// 系统文件选择器。
+//
+// 和拖拽并存而不是二选一：拖拽快，但有些环境（远程桌面、窗口管理器不友好）
+// 拖不动；反过来，选择器点得准，但比拖拽慢。两条路都留着。
+async function pickInto(kind) {
+  try {
+    return await invoke("pick_paths", { kind });
+  } catch (e) {
+    // 选择器不可用时不要把用户堵死，提示他还能粘贴路径
+    $("receive-hint").textContent = String(e);
+    return [];
+  }
+}
+$("pick-files").onclick = async () => addPaths(await pickInto("files"));
+$("pick-folder").onclick = async () => addPaths(await pickInto("folder"));
+$("pick-dest").onclick = async () => {
+  const list = await pickInto("folder");
+  if (list.length) $("dest-input").value = list[0];
+};
+
 // 拖拽：这个产品的核心动作是"把东西摊到桌上"，所以拖拽必须能用
 const wv = T.webview?.getCurrentWebview?.();
 const dropZone = $("drop");
