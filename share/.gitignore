@@ -1,7 +1,0 @@
-# Rust 构建产物
-/target/
-**/*.rs.bk
-
-# 本地测试/临时数据
-*.part
-resume.json

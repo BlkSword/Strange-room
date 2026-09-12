@@ -1,55 +1,25 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+# ── 内部文档 ──────────────────────────────────────────────
+# 产品方向、工程规划等内部文档只保留在本地，不随仓库上传
+docs/
 
-# dependencies
-/node_modules
-/.pnp
-.pnp.*
-.yarn/*
-!.yarn/patches
-!.yarn/plugins
-!.yarn/releases
-!.yarn/versions
+# ── Rust 构建产物 ─────────────────────────────────────────
+target/
+**/*.rs.bk
+**/*.pdb
 
-# testing
-/coverage
+# ── 前端（Tauri v2 桌面端会用到）──────────────────────────
+node_modules/
+dist/
+.next/
 
-# next.js
-/.next/
-/out/
+# ── 运行时产物 ────────────────────────────────────────────
+# 接收端的临时文件与续传状态：不该进仓库
+*.part
+resume.json
 
-# production
-/build
-/dist
-
-# electron
-*.log
-
-# tauri
-/src-tauri/target
-
-# misc
+# ── 编辑器 / 系统 ─────────────────────────────────────────
 .DS_Store
-*.pem
-
-# debug
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
-
-# env files (can opt-in for committing if needed)
-.env*
-
-# vercel
-.vercel
-
-# typescript
-*.tsbuildinfo
-next-env.d.ts
-
-
-#other
-ARCHITECTURE.md
-.npmrc
-.claude
-CLAUDE.md
+Thumbs.db
+.idea/
+.vscode/
+*.swp
