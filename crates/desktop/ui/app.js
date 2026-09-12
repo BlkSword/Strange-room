@@ -104,7 +104,7 @@ $("start-share").onclick = async () => {
     $("copy-payload").dataset.payload = info.payload;
     show("screen-share");
   } catch (e) {
-    showResult("没能开始分享", String(e), "如果是大文件夹，扫描需要一点时间；路径错误也会失败。");
+    showResult("没能开始分享", String(e), "如果是大文件夹，扫描需要一点时间；路径错误也会失败。", "fail");
   } finally {
     btn.disabled = false;
     btn.textContent = "开始分享";
@@ -147,7 +147,7 @@ $("start-receive").onclick = async () => {
   try {
     await invoke("start_receive", { payload, dest });
   } catch (e) {
-    showResult("没能开始接收", String(e), "");
+    showResult("没能开始接收", String(e), "", "fail");
   }
 };
 
@@ -160,9 +160,9 @@ $("diagnose").onclick = async () => {
   btn.textContent = "自检中…";
   try {
     const report = await invoke("diagnose_payload", { payload });
-    showResult("网络自检", report, "");
+    showResult("网络自检", report, "", "info");
   } catch (e) {
-    showResult("自检没能完成", String(e), "请检查连接串是否完整。");
+    showResult("自检没能完成", String(e), "请检查连接串是否完整。", "fail");
   } finally {
     btn.disabled = false;
     btn.textContent = "诊断网络";
@@ -188,10 +188,18 @@ function showTransfer() {
   show("screen-transfer");
 }
 
-function showResult(title, body, hint) {
+// kind：ok（成功）/ fail（失败）/ stop（用户主动停止）/ info（信息，如自检报告）
+// 图标不只是装饰：一眼看出"成了还是没成"，比读一行字快得多
+function showResult(title, body, hint, kind) {
+  const k = kind || "ok";
   $("result-title").innerHTML = `<span class="big">${title}</span>`;
   $("result-body").textContent = body || "";
   $("result-hint").textContent = hint || "";
+  const g = $("result-glyph");
+  if (g) {
+    g.dataset.kind = k;
+    g.textContent = k === "ok" ? "✓" : k === "fail" ? "!" : k === "stop" ? "■" : "i";
+  }
   show("screen-result");
 }
 
@@ -245,7 +253,8 @@ if (listen) {
         showResult(
           "传输完成",
           `${e.files} 个文件，共 ${e.humanBytes}`,
-          ""
+          "",
+          "ok"
         );
         break;
       case "failed": {
@@ -255,13 +264,15 @@ if (listen) {
           showResult(
             "已停止",
             "已接收的部分已经保留下来了。下次连接同一个分享，会自动从断点接着传。",
-            ""
+            "",
+            "stop"
           );
         } else {
           showResult(
             "没能完成",
             e.message,
-            "如果提示指纹不匹配，说明二维码已过期或被改动，请让对方重新出示二维码。"
+            "如果提示指纹不匹配，说明二维码已过期或被改动，请让对方重新出示二维码。",
+            "fail"
           );
         }
         break;

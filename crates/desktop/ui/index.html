@@ -59,6 +59,9 @@
   <!-- ② 等待接收：二维码 + 地址 -->
   <section id="screen-share" class="screen">
     <div class="panel">
+      <div class="row" style="justify-content:center">
+        <span class="pill"><span class="dot"></span>等待对方扫码</span>
+      </div>
       <div class="qr" id="qr"></div>
       <div class="meta">
         <span class="big" id="share-summary"></span>
@@ -96,7 +99,8 @@
 
   <!-- ④ 结果 -->
   <section id="screen-result" class="screen">
-    <div class="panel" style="flex:1;display:flex;flex-direction:column;justify-content:center;gap:10px">
+    <div class="panel result-panel">
+      <div id="result-glyph" class="glyph" data-kind="ok">✓</div>
       <div id="result-title" class="meta"><span class="big"></span></div>
       <div id="result-body" class="note"></div>
       <div id="result-hint" class="note warn"></div>
