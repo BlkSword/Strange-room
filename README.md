@@ -65,6 +65,40 @@ cargo build --release
 传输用 QUIC（`quinn`），自带加密与多路复用；v1 用单条双向流跑完整会话。
 协议层与传输解耦，将来换传输不影响上层。
 
+## 运行平台
+
+| 组件 | Windows | Linux | macOS |
+|---|---|---|---|
+| 内核 + CLI（`sr`） | ✅ | ✅ | ✅ |
+| 桌面端（Tauri） | ✅ WebView2（Win10+ 自带） | ⚠️ 需先装 WebKitGTK | ✅ 系统自带 WebKit |
+
+内核与 CLI 是纯 Rust，没有平台专有代码，三平台都能直接 `cargo build --release`。
+
+**在 Linux 上跑桌面端**需要先装 WebKitGTK——Tauri 在 Linux 上用的是 WebKitGTK，
+而不是 Windows 那套 WebView2：
+
+```bash
+sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev
+```
+
+### 一处真实的平台差异：磁盘空间预留
+
+这点值得单独说明，因为它影响"大文件传到一半会不会失败"：
+
+- **Windows**：把文件长度改大（`SetEndOfFile`）会让 NTFS **真的分配簇**，等于预分配。
+- **Linux**：同样的做法只产生**空洞**（稀疏文件）——`ls -l` 看着有 2GB，实际一个盘块都没占。
+  于是"磁盘满"会拖到传到 90% 才爆出来，正好是这一层要防的那种失败。
+
+所以 Unix 上改用 `posix_fallocate` 真正预留空间，空间不够时在**传输开始之前**
+就报错（文件系统不支持 fallocate 时退回改长度，退化成稀疏文件但不会直接失败）。
+这是整个内核里唯一的平台差异，代码在 `crates/core/src/fs_util.rs::preallocate`。
+
+### 这件事由 CI 保证，不是由这句话保证
+
+`.github/workflows/ci.yml` 会在 Linux / Windows / macOS 三平台上都跑一遍
+测试与构建。端到端用例是真的起 QUIC 端点互传文件、真的做断点续传，
+所以 CI 通过就意味着"能编译"并且"能传"。
+
 ## 已知限制
 
 这些是**现在还没有**的，不要期待：

@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # 仓库里的 .cargo/config.toml 是开发机的镜像与代理设置，
+      # CI 上直接用官方 registry 更稳，所以先把它移除。
+      - name: 使用官方 crate registry
+        shell: bash
+        run: rm -f .cargo/config.toml
+
+      # 桌面端在 Linux 上走 WebKitGTK（Windows 上走 WebView2，无需额外依赖）
+      - name: 安装 Linux 桌面端依赖
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev libxdo-dev libssl-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # 内核与 CLI 在三平台上都必须能编译并通过测试。
+      # 端到端用例会真的起 QUIC 端点互传文件、真的做断点续传，
+      # 所以这一条命令同时验证了"能编译"和"能传"。
+      - name: 测试内核与 CLI
+        run: cargo test -p strange-room-core -p sr-cli
+
+      # 桌面端只在 Linux 与 Windows 上构建验证（macOS 也能过，但没必要占额度）
+      - name: 构建桌面端
+        run: cargo build -p sr-desktop
