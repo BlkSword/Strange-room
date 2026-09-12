@@ -563,349 +563,472 @@ impl Receiver {
     /// 连接主机、接收全部文件。返回摘要。
     pub async fn run(opts: ReceiverOptions, progress: &ProgressSender) -> Result<TransferSummary> {
         tls::ensure_crypto_provider();
-        let mut last_err: Option<Error> = None;
-        let mut conn = None;
 
-        // 外层重试：接收端被强杀时，主机要等到空闲超时才会发现，之后才回到
-        // `accept()`。这中间有几秒钟"主机还没准备好再接一个"的窗口。
-        // 续传的价值恰恰在"断线后还能接上"，所以这里必须耐心等，而不是
-        // 失败一次就告诉用户"连不上"。
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-        let mut round = 0u32;
-        while conn.is_none() {
-            opts.cancel.check()?;
-            round += 1;
-            if round > 1 {
-                println!("主机暂时还连不上，正在重试（第 {round} 次）……如果主机刚结束上一个会话，请稍候几秒");
-            }
+        // 会话中断就自动重连续传，而不是把"重跑一次命令"推给用户。
+        //
+        // 为什么必须有：WiFi 抖一下、笔记本合盖、主机那边点了停止，都会让连接断掉。
+        // 断点续传的价值恰恰在"断线之后"才体现——如果每次断线都要用户手动重来，
+        // 那这项能力只算做了一半。
+        //
+        // 只重试"握手成功之后才断"的情形：握手阶段的失败走不到这里（见 open_session），
+        // 会话正常收尾（哪怕有文件因为目标写不进去被跳过）也不会进到这个分支。
+        const MAX_ATTEMPTS: u32 = 4;
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
+            let (conn, _endpoint) = connect_to_host(&opts, progress).await?;
+            let start = open_session(&conn, &opts, progress).await?;
 
-            // 主机可能给了多个候选地址（多网卡），挨个试
-            for hint in &opts.payload.addrs {
-                let addr = match tls::resolve_addr(&hint.host, hint.port).await {
-                    Ok(a) => a,
-                    Err(e) => {
-                        last_err = Some(e);
-                        continue;
+            match transfer_files(&conn, start, &opts, progress).await {
+                Ok(summary) => return Ok(summary),
+                Err(e) if attempt < MAX_ATTEMPTS && is_retryable_interruption(&e) => {
+                    // 退避 1s、2s、4s：短暂抖动一秒就够，真断了也不会让人干等
+                    let wait = std::time::Duration::from_secs(1 << (attempt - 1));
+                    progress.send(ProgressEvent::Warn(format!(
+                        "连接中断（{e}）。{} 秒后自动重连续传（第 {attempt}/{MAX_ATTEMPTS} 次尝试）",
+                        wait.as_secs()
+                    )));
+                    if !sleep_unless_cancelled(wait, &opts.cancel).await {
+                        return Err(Error::Cancelled);
                     }
-                };
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+}
 
-                let (client_cfg, fp_rejected) = tls::client_config(&opts.payload.fp)?;
-                let mut quinn_cfg = quinn::ClientConfig::new(Arc::new(
-                    quinn::crypto::rustls::QuicClientConfig::try_from(client_cfg)
-                        .map_err(|e| Error::protocol(format!("QUIC 客户端配置失败: {e}")))?,
-                ));
-                quinn_cfg.transport_config(transport_config());
+/// 连接到主机：轮询二维码里的候选地址，直到连上或者等够时间。
+///
+/// 单独抽成函数，是因为**每次自动重连都要再走一遍**：主机被强杀时它要等空闲超时
+/// 才会回到 `accept()`，这中间有几秒钟"主机还没准备好再接一个"的窗口。断线续传
+/// 的价值恰恰在"断了还能接上"，所以这里必须耐心等，而不是失败一次就报"连不上"。
+async fn connect_to_host(
+    opts: &ReceiverOptions,
+    progress: &ProgressSender,
+) -> Result<(quinn::Connection, quinn::Endpoint)> {
+    let mut last_err: Option<Error> = None;
+    let mut conn = None;
 
-                let sock = bind_udp("0.0.0.0:0".parse().unwrap())
-                    .map_err(|e| Error::protocol(format!("创建本地 UDP 端点失败: {e}")))?;
-                let mut endpoint = quinn::Endpoint::new(
-                    quinn::EndpointConfig::default(),
-                    None,
-                    sock,
-                    Arc::new(quinn::TokioRuntime),
-                )
+    // 外层重试：接收端被强杀时，主机要等到空闲超时才会发现，之后才回到
+    // `accept()`。这中间有几秒钟"主机还没准备好再接一个"的窗口。
+    // 续传的价值恰恰在"断线后还能接上"，所以这里必须耐心等，而不是
+    // 失败一次就告诉用户"连不上"。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let mut round = 0u32;
+    while conn.is_none() {
+        opts.cancel.check()?;
+        round += 1;
+        if round > 1 {
+            progress.send(ProgressEvent::Warn(format!(
+                "主机暂时还连不上，正在重试（第 {round} 次）……如果主机刚结束上一个会话，请稍候几秒"
+            )));
+        }
+
+        // 主机可能给了多个候选地址（多网卡），挨个试
+        for hint in &opts.payload.addrs {
+            let addr = match tls::resolve_addr(&hint.host, hint.port).await {
+                Ok(a) => a,
+                Err(e) => {
+                    last_err = Some(e);
+                    continue;
+                }
+            };
+
+            let (client_cfg, fp_rejected) = tls::client_config(&opts.payload.fp)?;
+            let mut quinn_cfg = quinn::ClientConfig::new(Arc::new(
+                quinn::crypto::rustls::QuicClientConfig::try_from(client_cfg)
+                    .map_err(|e| Error::protocol(format!("QUIC 客户端配置失败: {e}")))?,
+            ));
+            quinn_cfg.transport_config(transport_config());
+
+            let sock = bind_udp("0.0.0.0:0".parse().unwrap())
                 .map_err(|e| Error::protocol(format!("创建本地 UDP 端点失败: {e}")))?;
-                endpoint.set_default_client_config(quinn_cfg);
+            let mut endpoint = quinn::Endpoint::new(
+                quinn::EndpointConfig::default(),
+                None,
+                sock,
+                Arc::new(quinn::TokioRuntime),
+            )
+            .map_err(|e| Error::protocol(format!("创建本地 UDP 端点失败: {e}")))?;
+            endpoint.set_default_client_config(quinn_cfg);
 
-                match endpoint.connect(addr, crate::identity::SERVER_NAME) {
-                    Ok(connecting) => {
-                        // 三路竞速：连上、校验器判定指纹不符、整体超时。
-                        //
-                        // 为什么要单独听 `fp_rejected`：QUIC 在证书被拒时不会立刻
-                        // 报错，而是静默重试到握手超时。只靠超时的话，一个"二维码
-                        // 过期"就要让用户干等十几秒，还只能看到笼统的"连接超时"。
-                        let flag_rx = fp_rejected.clone();
-                        let outcome = tokio::select! {
-                            r = connecting => Some(r),
-                            _ = async {
-                                loop {
-                                    if flag_rx.load(std::sync::atomic::Ordering::SeqCst) {
-                                        break;
-                                    }
-                                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            match endpoint.connect(addr, crate::identity::SERVER_NAME) {
+                Ok(connecting) => {
+                    // 三路竞速：连上、校验器判定指纹不符、整体超时。
+                    //
+                    // 为什么要单独听 `fp_rejected`：QUIC 在证书被拒时不会立刻
+                    // 报错，而是静默重试到握手超时。只靠超时的话，一个"二维码
+                    // 过期"就要让用户干等十几秒，还只能看到笼统的"连接超时"。
+                    let flag_rx = fp_rejected.clone();
+                    let outcome = tokio::select! {
+                        r = connecting => Some(r),
+                        _ = async {
+                            loop {
+                                if flag_rx.load(std::sync::atomic::Ordering::SeqCst) {
+                                    break;
                                 }
-                            } => None,
-                            _ = tokio::time::sleep(CONNECT_TIMEOUT) => {
-                                last_err = Some(Error::protocol(format!(
-                                    "连接 {addr} 超时（{} 秒）。可能原因：双方不在同一局域网、主机已停止分享、或防火墙拦截了 UDP",
-                                    CONNECT_TIMEOUT.as_secs()
-                                )));
-                                None
+                                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
                             }
-                        };
+                        } => None,
+                        _ = tokio::time::sleep(CONNECT_TIMEOUT) => {
+                            last_err = Some(Error::protocol(format!(
+                                "连接 {addr} 超时（{} 秒）。可能原因：双方不在同一局域网、主机已停止分享、或防火墙拦截了 UDP",
+                                CONNECT_TIMEOUT.as_secs()
+                            )));
+                            None
+                        }
+                    };
 
-                        match outcome {
-                            None if fp_rejected.load(std::sync::atomic::Ordering::SeqCst) => {
-                                // 指纹不符是安全问题，绝不能静默重试下一个地址
+                    match outcome {
+                        None if fp_rejected.load(std::sync::atomic::Ordering::SeqCst) => {
+                            // 指纹不符是安全问题，绝不能静默重试下一个地址
+                            return Err(Error::FingerprintMismatch {
+                                expected: opts.payload.fp.clone(),
+                                actual: "（主机出示的证书与二维码不一致）".into(),
+                            });
+                        }
+                        None => {}
+                        Some(Ok(c)) => {
+                            conn = Some((c, endpoint));
+                            break;
+                        }
+                        Some(Err(e)) => {
+                            if is_fingerprint_mismatch(&e) {
                                 return Err(Error::FingerprintMismatch {
                                     expected: opts.payload.fp.clone(),
                                     actual: "（主机出示的证书与二维码不一致）".into(),
                                 });
                             }
-                            None => {}
-                            Some(Ok(c)) => {
-                                conn = Some((c, endpoint));
-                                break;
-                            }
-                            Some(Err(e)) => {
-                                if is_fingerprint_mismatch(&e) {
-                                    return Err(Error::FingerprintMismatch {
-                                        expected: opts.payload.fp.clone(),
-                                        actual: "（主机出示的证书与二维码不一致）".into(),
-                                    });
-                                }
-                                last_err = Some(tls::friendly_connect_error(addr, &e));
-                            }
+                            last_err = Some(tls::friendly_connect_error(addr, &e));
                         }
                     }
-                    Err(e) => {
-                        last_err = Some(Error::protocol(format!("无法发起连接 {addr}：{e}")));
-                    }
                 }
-            }
-
-            if conn.is_none() {
-                if std::time::Instant::now() >= deadline {
-                    break;
+                Err(e) => {
+                    last_err = Some(Error::protocol(format!("无法发起连接 {addr}：{e}")));
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
         }
+
+        if conn.is_none() {
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }
 // ---- SPLICE MARKER ----
-        let (conn, _endpoint) = conn.ok_or_else(|| {
-            last_err.unwrap_or_else(|| Error::protocol("无法连接到主机，二维码里的地址都试过了"))
-        })?;
-        let _ = conn;
+    conn.ok_or_else(|| {
+        last_err.unwrap_or_else(|| Error::protocol("无法连接到主机，二维码里的地址都试过了"))
+    })
+}
 
-        let (mut send, mut recv) = conn
-            .open_bi()
-            .await
-            .map_err(|e| Error::protocol(format!("无法建立数据流: {e}")))?;
+/// 会话开场：交换问候、拿到文件清单、把续传状态准备好。
+struct SessionStart {
+    send: quinn::SendStream,
+    recv: quinn::RecvStream,
+    manifest: FileManifest,
+    state: ResumeState,
+    max_chunk_size: u32,
+}
 
-        // ---- 1. 握手 ----
-        let hello = ClientHello {
-            protocol_version: PROTOCOL_VERSION,
-            session_id: opts.payload.sid.clone(),
-            device_name: opts.device_name.clone(),
-        };
-        write_frame(&mut send, &Frame::json(KIND_HELLO, &hello)?).await?;
+/// 开场（握手 + 清单 + 续传状态）。
+///
+/// 这里的失败**不自动重试**：二维码过期、协议版本不符、主机停了分享，重试多少次
+/// 结果都一样，不如立刻把话说清楚，让用户去重新扫码。
+async fn open_session(
+    conn: &quinn::Connection,
+    opts: &ReceiverOptions,
+    progress: &ProgressSender,
+) -> Result<SessionStart> {
+    let (mut send, mut recv) = conn
+        .open_bi()
+        .await
+        .map_err(|e| Error::protocol(format!("无法建立数据流: {e}")))?;
 
-        let frame = read_frame(&mut recv)
-            .await?
-            .ok_or_else(|| Error::protocol("主机在握手阶段断开了连接"))?;
-        if frame.kind == KIND_ERROR {
-            let e: ErrorMsg = frame.decode_json()?;
-            return Err(Error::protocol(e.message));
-        }
-        frame.expect_kind(KIND_HELLO, "握手响应")?;
-        let server_hello: ServerHello = frame.decode_json()?;
-        if server_hello.protocol_version != PROTOCOL_VERSION {
-            return Err(Error::protocol(format!(
-                "主机协议版本 {} 与本机 {PROTOCOL_VERSION} 不匹配",
-                server_hello.protocol_version
-            )));
-        }
+    // ---- 1. 握手 ----
+    let hello = ClientHello {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: opts.payload.sid.clone(),
+        device_name: opts.device_name.clone(),
+    };
+    write_frame(&mut send, &Frame::json(KIND_HELLO, &hello)?).await?;
 
-        // ---- 2. 清单 ----
-        let frame = read_frame(&mut recv)
-            .await?
-            .ok_or_else(|| Error::protocol("主机没有发送文件清单"))?;
-        frame.expect_kind(KIND_MANIFEST, "文件清单")?;
-        let manifest: FileManifest = frame.decode_json()?;
+    let frame = read_frame(&mut recv)
+        .await?
+        .ok_or_else(|| Error::protocol("主机在握手阶段断开了连接"))?;
+    if frame.kind == KIND_ERROR {
+        let e: ErrorMsg = frame.decode_json()?;
+        return Err(Error::protocol(e.message));
+    }
+    frame.expect_kind(KIND_HELLO, "握手响应")?;
+    let server_hello: ServerHello = frame.decode_json()?;
+    if server_hello.protocol_version != PROTOCOL_VERSION {
+        return Err(Error::protocol(format!(
+            "主机协议版本 {} 与本机 {PROTOCOL_VERSION} 不匹配",
+            server_hello.protocol_version
+        )));
+    }
 
-        progress.send(ProgressEvent::SessionStarted {
-            peer: server_hello.device_name.clone(),
-            total_files: manifest.files.len(),
-            total_bytes: manifest.total_bytes,
-        });
+    // ---- 2. 清单 ----
+    let frame = read_frame(&mut recv)
+        .await?
+        .ok_or_else(|| Error::protocol("主机没有发送文件清单"))?;
+    frame.expect_kind(KIND_MANIFEST, "文件清单")?;
+    let manifest: FileManifest = frame.decode_json()?;
 
-        // ---- 3. 准备续传状态 ----
-        tokio::fs::create_dir_all(&opts.dest_dir)
-            .await
-            .map_err(|e| Error::io(&opts.dest_dir, e))?;
-        let mut state = if opts.continue_partial {
-            ResumeState::load(&opts.dest_dir)
-        } else {
-            ResumeState::new(opts.payload.sid.clone())
-        };
-        if state.session_id.is_empty() {
-            state.session_id = opts.payload.sid.clone();
-        }
+    progress.send(ProgressEvent::SessionStarted {
+        peer: server_hello.device_name.clone(),
+        total_files: manifest.files.len(),
+        total_bytes: manifest.total_bytes,
+    });
 
-        let mut summary = TransferSummary::default();
-        for entry in &manifest.files {
-            opts.cancel.check()?;
-            let rel = fs_util::safe_relative_path(&entry.relative_path)?;
-            let target = fs_util::join_checked(&opts.dest_dir, &rel);
-            let part = fs_util::part_path(&target);
+    // ---- 3. 准备续传状态 ----
+    tokio::fs::create_dir_all(&opts.dest_dir)
+        .await
+        .map_err(|e| Error::io(&opts.dest_dir, e))?;
+    let mut state = if opts.continue_partial {
+        ResumeState::load(&opts.dest_dir)
+    } else {
+        ResumeState::new(opts.payload.sid.clone())
+    };
+    if state.session_id.is_empty() {
+        state.session_id = opts.payload.sid.clone();
+    }
 
-            // 已完成的文件直接跳过（这才是"断点续传"里省时间的部分：
-            // 重连后不重传已经收好的文件）
-            let have = state.resume_offset(&entry.file_id, &part, entry.size);
-            if have >= entry.size && entry.size > 0 {
-                // 已经从上次会话收完了？重新校验一遍再确认，不能只看状态文件
-                let part_hash_ok = match fs_util::hash_file(&part) {
-                    Ok(h) => hex::encode(h.as_bytes()).eq_ignore_ascii_case(&entry.blake3),
-                    Err(_) => false,
-                };
-                if part_hash_ok {
-                    fs_util::atomic_rename(&part, &target)?;
-                    state.upsert(PartialFile {
-                        relative_path: entry.relative_path.clone(),
-                        file_id: entry.file_id.clone(),
-                        total_size: entry.size,
-                        partial: entry.size,
-                        partial_hash: None,
-                        completed: true,
-                    });
-                    progress.send(ProgressEvent::FileFinished {
-                        file_id: entry.file_id.clone(),
-                        relative_path: entry.relative_path.clone(),
-                    });
-                    summary.files_sent += 1;
-                    summary.bytes_sent += entry.size;
-                    continue;
-                }
-                // 校验没过：删掉重来
-                let _ = std::fs::remove_file(&part);
-            }
+    Ok(SessionStart {
+        send,
+        recv,
+        manifest,
+        state,
+        max_chunk_size: server_hello.max_chunk_size,
+    })
+}
 
-            // 本地准备必须在**发 OFFER 之前**做完，理由见 prepare_target 的注释：
-            // 这一步一旦失败而又已经发过 OFFER，主机推来的数据就没人接，
-            // 整个单流会话会失步（后面所有文件都跟着完蛋）。
-            // 放在前面失败，最坏也只是"这个文件跳过"，会话继续。
-            if let Err(e) = prepare_target(&part, entry.size, have).await {
-                let msg = e.to_string();
-                progress.send(ProgressEvent::Warn(format!(
-                    "跳过 {}：{msg}",
-                    entry.relative_path
-                )));
-                summary.failures.push((entry.relative_path.clone(), msg));
+/// 逐个文件接收，直到清单走完。
+///
+/// 这里开始的失败**才值得自动重连**：连接是在传输途中断的，而进度已经落在磁盘上，
+/// 重连一次就能只补差额。
+async fn transfer_files(
+    conn: &quinn::Connection,
+    start: SessionStart,
+    opts: &ReceiverOptions,
+    progress: &ProgressSender,
+) -> Result<TransferSummary> {
+    let SessionStart {
+        mut send,
+        mut recv,
+        manifest,
+        mut state,
+        max_chunk_size,
+    } = start;
+
+    let mut summary = TransferSummary::default();
+    for entry in &manifest.files {
+        opts.cancel.check()?;
+        let rel = fs_util::safe_relative_path(&entry.relative_path)?;
+        let target = fs_util::join_checked(&opts.dest_dir, &rel);
+        let part = fs_util::part_path(&target);
+
+        // 已完成的文件直接跳过（这才是"断点续传"里省时间的部分：
+        // 重连后不重传已经收好的文件）
+        let have = state.resume_offset(&entry.file_id, &part, entry.size);
+        if have >= entry.size && entry.size > 0 {
+            // 已经从上次会话收完了？重新校验一遍再确认，不能只看状态文件
+            let part_hash_ok = match fs_util::hash_file(&part) {
+                Ok(h) => hex::encode(h.as_bytes()).eq_ignore_ascii_case(&entry.blake3),
+                Err(_) => false,
+            };
+            if part_hash_ok {
+                fs_util::atomic_rename(&part, &target)?;
+                state.upsert(PartialFile {
+                    relative_path: entry.relative_path.clone(),
+                    file_id: entry.file_id.clone(),
+                    total_size: entry.size,
+                    partial: entry.size,
+                    partial_hash: None,
+                    completed: true,
+                });
+                progress.send(ProgressEvent::FileFinished {
+                    file_id: entry.file_id.clone(),
+                    relative_path: entry.relative_path.clone(),
+                });
+                summary.files_sent += 1;
+                summary.bytes_sent += entry.size;
                 continue;
             }
+            // 校验没过：删掉重来
+            let _ = std::fs::remove_file(&part);
+        }
 
-            let offer = FileOffer {
-                file_id: entry.file_id.clone(),
-                relative_path: entry.relative_path.clone(),
-                size: entry.size,
-                blake3: entry.blake3.clone(),
-                have_bytes: have,
-                chunk_size: server_hello.max_chunk_size,
-            };
-            write_frame(&mut send, &Frame::json(KIND_OFFER, &offer)?).await?;
+        // 本地准备必须在**发 OFFER 之前**做完，理由见 prepare_target 的注释：
+        // 这一步一旦失败而又已经发过 OFFER，主机推来的数据就没人接，
+        // 整个单流会话会失步（后面所有文件都跟着完蛋）。
+        // 放在前面失败，最坏也只是"这个文件跳过"，会话继续。
+        if let Err(e) = prepare_target(&part, entry.size, have).await {
+            let msg = e.to_string();
+            progress.send(ProgressEvent::Warn(format!(
+                "跳过 {}：{msg}",
+                entry.relative_path
+            )));
+            summary.failures.push((entry.relative_path.clone(), msg));
+            continue;
+        }
 
-            let frame = read_frame(&mut recv)
-                .await?
-                .ok_or_else(|| Error::protocol("主机在协商阶段断开"))?;
-            frame.expect_kind(KIND_ACK, "续传确认")?;
-            let ack: OfferAck = frame.decode_json()?;
-            let start_offset = ack.start_offset.min(entry.size);
+        let offer = FileOffer {
+            file_id: entry.file_id.clone(),
+            relative_path: entry.relative_path.clone(),
+            size: entry.size,
+            blake3: entry.blake3.clone(),
+            have_bytes: have,
+            chunk_size: max_chunk_size,
+        };
+        write_frame(&mut send, &Frame::json(KIND_OFFER, &offer)?).await?;
 
-            let received = match receive_one_file(
-                &mut recv,
-                &entry.file_id,
-                &entry.relative_path,
-                &target,
-                &part,
-                entry.size,
-                start_offset,
-                &entry.blake3,
-                &mut state,
-                &opts.dest_dir,
-                progress,
-                &opts.cancel,
-            )
-            .await
-            {
-                Ok(n) => n,
-                Err(e) => {
-                    // 取消不是"某个文件失败了"，而是整次接收停止：直接退出，
-                    // 绝不能记成失败后继续下一个文件
-                    if matches!(e, Error::Cancelled) {
-                        return Err(e);
-                    }
-                    // 传一半才失败（磁盘写错、对端断开、校验不符……）必须**结束整次会话**，
-                    // 不能"记一笔失败，接着协商下一个文件"。
-                    //
-                    // 原因：主机此刻还在按自己的节奏推这个文件的数据，接收端如果跳去谈
-                    // 下一个文件，流上剩下的数据帧会被当成控制帧解析，单流会话就此失步
-                    // （实测报错是"期望续传确认（帧类型 3），实际收到帧类型 4"）。
-                    // 结束会话是安全的一侧：已收到的部分和检查点都留着，用户重跑一次
-                    // 就能从这个文件的断点续上，而不是留下一个静默错乱的状态。
-                    let msg = e.to_string();
-                    progress.send(ProgressEvent::Warn(format!(
-                        "{} 中断：{msg}；已收到的部分已保留，重新运行可续传",
-                        entry.relative_path
-                    )));
-                    summary.failures.push((entry.relative_path.clone(), msg.clone()));
-                    // 尽力通知主机（它此刻多半在写，看不到这条，但正常收尾时用得上）
-                    let _ = write_frame(
-                        &mut send,
-                        &Frame::json(
-                            KIND_RESULT,
-                            &TransferResult {
-                                file_id: entry.file_id.clone(),
-                                ok: false,
-                                error: Some(msg),
-                            },
-                        )?,
-                    )
-                    .await;
+        let frame = read_frame(&mut recv)
+            .await?
+            .ok_or_else(|| Error::protocol("主机在协商阶段断开"))?;
+        frame.expect_kind(KIND_ACK, "续传确认")?;
+        let ack: OfferAck = frame.decode_json()?;
+        let start_offset = ack.start_offset.min(entry.size);
+
+        let received = match receive_one_file(
+            &mut recv,
+            &entry.file_id,
+            &entry.relative_path,
+            &target,
+            &part,
+            entry.size,
+            start_offset,
+            &entry.blake3,
+            &mut state,
+            &opts.dest_dir,
+            progress,
+            &opts.cancel,
+        )
+        .await
+        {
+            Ok(n) => n,
+            Err(e) => {
+                // 取消不是"某个文件失败了"，而是整次接收停止：直接退出，
+                // 绝不能记成失败后继续下一个文件
+                if matches!(e, Error::Cancelled) {
                     return Err(e);
                 }
-            };
+                // 传一半才失败（磁盘写错、对端断开、校验不符……）必须**结束整次会话**，
+                // 不能"记一笔失败，接着协商下一个文件"。
+                //
+                // 原因：主机此刻还在按自己的节奏推这个文件的数据，接收端如果跳去谈
+                // 下一个文件，流上剩下的数据帧会被当成控制帧解析，单流会话就此失步
+                // （实测报错是"期望续传确认（帧类型 3），实际收到帧类型 4"）。
+                // 结束会话是安全的一侧：已收到的部分和检查点都留着，用户重跑一次
+                // 就能从这个文件的断点续上，而不是留下一个静默错乱的状态。
+                let msg = e.to_string();
+                progress.send(ProgressEvent::Warn(format!(
+                    "{} 中断：{msg}；已收到的部分已保留，重新运行可续传",
+                    entry.relative_path
+                )));
+                summary.failures.push((entry.relative_path.clone(), msg.clone()));
+                // 尽力通知主机（它此刻多半在写，看不到这条，但正常收尾时用得上）
+                let _ = write_frame(
+                    &mut send,
+                    &Frame::json(
+                        KIND_RESULT,
+                        &TransferResult {
+                            file_id: entry.file_id.clone(),
+                            ok: false,
+                            error: Some(msg),
+                        },
+                    )?,
+                )
+                .await;
+                return Err(e);
+            }
+        };
 
-            summary.files_sent += 1;
-            summary.bytes_sent += received;
-
-            let _ = write_frame(
-                &mut send,
-                &Frame::json(
-                    KIND_RESULT,
-                    &TransferResult {
-                        file_id: entry.file_id.clone(),
-                        ok: true,
-                        error: None,
-                    },
-                )?,
-            )
-            .await;
-
-            // 必须等主机对 RESULT 的回应，否则会话会失去同步：
-            // 主机在文件发完后会读下一个 OFFER，而我们如果直接进入下一个
-            // 文件或发 BYE，主机就会读到"意外帧"。这里同步一次，让双方的
-            // 收发永远成对。
-            drain_result(&mut recv, &entry.file_id).await?;
-        }
+        summary.files_sent += 1;
+        summary.bytes_sent += received;
 
         let _ = write_frame(
             &mut send,
             &Frame::json(
-                KIND_BYE,
-                &Bye {
-                    reason: Some("receiver done".into()),
+                KIND_RESULT,
+                &TransferResult {
+                    file_id: entry.file_id.clone(),
+                    ok: true,
+                    error: None,
                 },
             )?,
         )
         .await;
-        let _ = send.finish();
 
-        // 全部成功时把续传状态文件删掉：它只是"下次能少传一点"的辅助信息，
-        // 传完后留着既没有用，也和"不留痕"的定位不符（用户目录里平白多出一个
-        // 看不懂的 json）。有失败时保留，方便同一会话内重试续传。
-        if summary.failures.is_empty() {
-            let _ = std::fs::remove_file(opts.dest_dir.join(RESUME_FILE));
-        }
-
-        progress.send(ProgressEvent::SessionFinished {
-            files: summary.files_sent,
-            bytes: summary.bytes_sent,
-        });
-
-        // 主动关闭，不去等 conn.closed()：等它只会一直拖到 QUIC 空闲超时。
-        conn.close(0u32.into(), b"done");
-        Ok(summary)
+        // 必须等主机对 RESULT 的回应，否则会话会失去同步：
+        // 主机在文件发完后会读下一个 OFFER，而我们如果直接进入下一个
+        // 文件或发 BYE，主机就会读到"意外帧"。这里同步一次，让双方的
+        // 收发永远成对。
+        drain_result(&mut recv, &entry.file_id).await?;
     }
+
+    let _ = write_frame(
+        &mut send,
+        &Frame::json(
+            KIND_BYE,
+            &Bye {
+                reason: Some("receiver done".into()),
+            },
+        )?,
+    )
+    .await;
+    let _ = send.finish();
+
+    // 全部成功时把续传状态文件删掉：它只是"下次能少传一点"的辅助信息，
+    // 传完后留着既没有用，也和"不留痕"的定位不符（用户目录里平白多出一个
+    // 看不懂的 json）。有失败时保留，方便同一会话内重试续传。
+    if summary.failures.is_empty() {
+        let _ = std::fs::remove_file(opts.dest_dir.join(RESUME_FILE));
+    }
+
+    progress.send(ProgressEvent::SessionFinished {
+        files: summary.files_sent,
+        bytes: summary.bytes_sent,
+    });
+
+    // 主动关闭，不去等 conn.closed()：等它只会一直拖到 QUIC 空闲超时。
+    conn.close(0u32.into(), b"done");
+    Ok(summary)
+}
+
+/// 这个错误值不值得自动重连？
+///
+/// 能走到这里说明握手已经成功，所以"二维码过期"这类死路已经排除了。剩下要挡的是
+/// 重试也不会变好的几种：用户主动取消、证书指纹不符（安全问题，绝不能靠重试掩盖）、
+/// 路径不安全、磁盘空间不足。
+fn is_retryable_interruption(e: &Error) -> bool {
+    !matches!(
+        e,
+        Error::Cancelled
+            | Error::FingerprintMismatch { .. }
+            | Error::UnsafePath(_)
+            | Error::InsufficientSpace { .. }
+    )
+}
+
+/// 睡一段时间，期间可以被取消打断。返回 false 表示用户取消了。
+///
+/// 不用一个 `sleep` 是因为取消要能**立刻**生效：退避最长 4 秒，用户按了停止却还要
+/// 等满 4 秒才退出，会让人以为程序卡住了。
+async fn sleep_unless_cancelled(dur: std::time::Duration, cancel: &CancelToken) -> bool {
+    const STEP: std::time::Duration = std::time::Duration::from_millis(100);
+    let mut left = dur;
+    while left > std::time::Duration::ZERO {
+        if cancel.is_cancelled() {
+            return false;
+        }
+        let slice = left.min(STEP);
+        tokio::time::sleep(slice).await;
+        left = left.saturating_sub(slice);
+    }
+    !cancel.is_cancelled()
 }
 
 /// 接收一个文件之前的本地准备：建父目录、真预分配、查磁盘空间。

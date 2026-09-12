@@ -358,3 +358,78 @@ async fn cancel_stops_promptly_and_keeps_progress_for_resume() {
 
     let _ = tokio::time::timeout(std::time::Duration::from_secs(20), host2).await;
 }
+
+/// 链路真的断掉时，接收端必须**自己接上续传**，而不是把"重跑一遍命令"丢给用户。
+///
+/// 这条守的是断点续传的"自动"那一半：进度留在盘上只是必要条件，用户还得手动重来
+/// 就不算真的能用——WiFi 抖一下、笔记本合盖，谁都可能遇到。
+///
+/// 手法：主机第一个会话传到一半就把任务 abort 掉（等价于链路突然消失，不是优雅关闭），
+/// 然后继续举着二维码接下一个连接（现实中主机端一直开着）。断言：
+/// 1. 没有任何失败；
+/// 2. 最终文件逐字节一致；
+/// 3. **补传的字节数小于文件总大小**——说明真的从断点续上了，而不是从头再传一遍。
+#[tokio::test(flavor = "multi_thread")]
+async fn reconnects_and_resumes_after_a_real_interruption() {
+    common::isolated_env();
+    let (_src_guard, src) = tmp();
+    let (_dst_guard, dst) = tmp();
+
+    let total = 48 * 1024 * 1024usize;
+    let data = pseudo_random(total, 31337);
+    let file = src.join("big.bin");
+    std::fs::write(&file, &data).unwrap();
+
+    let plan = plan_paths(std::slice::from_ref(&file)).unwrap();
+    let session = std::sync::Arc::new(start_host(plan).await);
+    let payload = payload_for(&session);
+
+    // 第一个会话：传一会儿就掐掉
+    let first = session.clone();
+    let host1 = tokio::spawn(async move { first.accept_once(&ProgressSender::new()).await });
+    let killer = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        host1.abort();
+    });
+
+    // 主机继续服务（真实场景里主机一直挂着二维码等人连）
+    let second = session.clone();
+    let host2 = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        second.accept_once(&ProgressSender::new()).await
+    });
+
+    let started = std::time::Instant::now();
+    let summary = Receiver::run(
+        ReceiverOptions {
+            payload,
+            dest_dir: dst.clone(),
+            device_name: "接收端".into(),
+            continue_partial: true,
+            cancel: sr_core::CancelToken::new(),
+        },
+        &ProgressSender::new(),
+    )
+    .await
+    .expect("断线之后应当自动重连续传，而不是直接失败");
+    let elapsed = started.elapsed();
+
+    assert!(summary.failures.is_empty(), "{:?}", summary.failures);
+    assert_eq!(summary.files_sent, 1, "应当是同一个文件被续传完成");
+    assert!(
+        summary.bytes_sent < total as u64,
+        "重连之后应该只补差额，实际又传了 {} 字节（总共 {total} 字节）——说明没有真的续传，而是从头再传",
+        summary.bytes_sent
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(60),
+        "自动重连不该拖这么久（实际 {elapsed:?}）"
+    );
+
+    let got = std::fs::read(dst.join("big.bin")).expect("目标文件不存在");
+    assert_eq!(got.len(), data.len(), "续传后的文件长度不对");
+    assert_eq!(got, data, "重连续传后的内容必须逐字节一致");
+
+    killer.await.ok();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(20), host2).await;
+}
