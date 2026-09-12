@@ -85,6 +85,8 @@ enum UiEvent {
 struct AppState {
     /// 当前分享会话。取消 = 关掉它，`accept()` 立刻返回，循环退出。
     host: Mutex<Option<Arc<HostSession>>>,
+    /// 正在进行的接收。取消后已下载的部分会保留，下次可以续传。
+    transfer: Mutex<Option<sr_core::CancelToken>>,
 }
 
 /// 本机设备名：让对方在界面上知道连的是谁。
@@ -262,12 +264,20 @@ async fn start_share(
 
 /// 开始接收：连上主机并下载全部文件。
 #[tauri::command]
-async fn start_receive(app: AppHandle, payload: String, dest: String) -> Result<(), String> {
+async fn start_receive(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    payload: String,
+    dest: String,
+) -> Result<(), String> {
     let payload = sr_core::QrPayload::decode(&payload).map_err(|e| e.to_string())?;
     let dest_dir = PathBuf::from(dest);
 
     let progress = ProgressSender::new();
     spawn_forwarder(app.clone(), progress.subscribe());
+
+    let cancel = sr_core::CancelToken::new();
+    *state.transfer.lock().unwrap() = Some(cancel.clone());
 
     let app_done = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -277,6 +287,7 @@ async fn start_receive(app: AppHandle, payload: String, dest: String) -> Result<
                 dest_dir,
                 device_name: device_name(),
                 continue_partial: true,
+                cancel,
             },
             &progress,
         )
@@ -296,6 +307,17 @@ async fn start_receive(app: AppHandle, payload: String, dest: String) -> Result<
     });
 
     Ok(())
+}
+
+/// 停止正在进行的接收。
+///
+/// 走的是内核的协作式取消，不是杀进程：循环会在下一个安全检查点退出，
+/// 此时已写入的数据是完整的、检查点是最新的——用户下次打开能接着传。
+#[tauri::command]
+fn cancel_transfer(state: State<'_, AppState>) {
+    if let Some(t) = state.transfer.lock().unwrap().take() {
+        t.cancel();
+    }
 }
 
 /// 取消分享：关掉监听，accept 循环自己退出。
@@ -329,6 +351,7 @@ fn main() {
             start_share,
             start_receive,
             cancel_share,
+            cancel_transfer,
             inspect_payload
         ])
         .run(tauri::generate_context!())

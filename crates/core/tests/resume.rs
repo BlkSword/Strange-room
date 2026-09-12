@@ -125,6 +125,7 @@ async fn resumes_from_the_offset_recorded_on_disk() {
             dest_dir: dst.clone(),
             device_name: "接收端".into(),
             continue_partial: true,
+            cancel: sr_core::CancelToken::new(),
         },
         &cli_progress,
     )
@@ -220,6 +221,7 @@ async fn distrusts_a_checkpoint_that_does_not_match_the_disk() {
             dest_dir: dst.clone(),
             device_name: "r".into(),
             continue_partial: true,
+            cancel: sr_core::CancelToken::new(),
         },
         &ProgressSender::new(),
     )
@@ -239,4 +241,104 @@ async fn distrusts_a_checkpoint_that_does_not_match_the_disk() {
         host_summary.bytes_sent, total as u64,
         "不可信检查点必须导致整文件重传"
     );
+}
+
+/// 取消：必须立刻停下，而且**不能毁掉已收的进度**。
+///
+/// 这条用例守的是取消功能的真正价值。如果取消只是"把进程停掉"，用户会留下
+/// 半截 `.part` 和过期检查点，下次要么整段重传、要么更糟——把不完整的数据
+/// 当成完整的。所以这里同时断言三件事：返回得快、留下检查点、还能续传成功。
+#[tokio::test(flavor = "multi_thread")]
+async fn cancel_stops_promptly_and_keeps_progress_for_resume() {
+    common::isolated_env();
+    let (_src_guard, src) = tmp();
+    let (_dst_guard, dst) = tmp();
+
+    // 造一个足够大的文件，保证取消发生在传输途中而不是结束后
+    let total = 96 * 1024 * 1024usize;
+    let data = pseudo_random(total, 4242);
+    let file = src.join("big.bin");
+    std::fs::write(&file, &data).unwrap();
+
+    let plan = plan_paths(std::slice::from_ref(&file)).unwrap();
+    let file_id = plan.files[0].file_id.clone();
+    let rel_path = plan.files[0].relative_path.clone();
+
+    let session = start_host(plan).await;
+    let payload = payload_for(&session);
+    let host = tokio::spawn(async move { session.accept_once(&ProgressSender::new()).await });
+
+    // 150ms 后取消（此时应已传了一部分，但远没传完）
+    let cancel = sr_core::CancelToken::new();
+    let cancel_later = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        cancel_later.cancel();
+    });
+
+    let started = std::time::Instant::now();
+    let result = Receiver::run(
+        ReceiverOptions {
+            payload,
+            dest_dir: dst.clone(),
+            device_name: "接收端".into(),
+            continue_partial: true,
+            cancel,
+        },
+        &ProgressSender::new(),
+    )
+    .await;
+    let elapsed = started.elapsed();
+
+    assert!(
+        matches!(result, Err(sr_core::Error::Cancelled)),
+        "取消后应返回 Cancelled 错误，实际: {:?}",
+        result.as_ref().err().map(|e| e.to_string())
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "取消应当很快生效，实际耗时 {elapsed:?}"
+    );
+
+    // 关键断言：进度必须留下，而且状态里记录的是"可信的前缀"
+    let target = dst.join(&rel_path);
+    let part = sr_core::fs_util::part_path(&target);
+    assert!(part.exists(), "取消后必须保留 .part，否则下次只能整段重传");
+
+    let state = ResumeState::load(&dst);
+    let entry = state.get(&file_id).expect("取消后必须留下检查点");
+    assert!(!entry.completed, "取消时文件不该被标记为完成");
+
+    // 拿主机的这份任务收掉（它会因为对端断开而结束）
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(20), host).await;
+
+    // ── 重新开一个会话续传 ──
+    // 注意：换会话也能续，因为续传是按"相对路径派生出的 file_id"匹配的，
+    // 而不是按会话 ID。这正是当初选择路径派生 ID 的原因。
+    let session2 = start_host(plan_paths(std::slice::from_ref(&file)).unwrap()).await;
+    let payload2 = payload_for(&session2);
+    let host2 = tokio::spawn(async move { session2.accept_once(&ProgressSender::new()).await });
+
+    let summary = Receiver::run(
+        ReceiverOptions {
+            payload: payload2,
+            dest_dir: dst.clone(),
+            device_name: "接收端".into(),
+            continue_partial: true,
+            cancel: sr_core::CancelToken::new(),
+        },
+        &ProgressSender::new(),
+    )
+    .await
+    .expect("取消后应当还能续传成功");
+
+    assert_eq!(
+        std::fs::read(&target).unwrap(),
+        data,
+        "续传后的内容必须与源文件逐字节一致"
+    );
+    assert!(summary.failures.is_empty(), "{:?}", summary.failures);
+    assert!(!part.exists(), "续传成功后 .part 应已改名");
+
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(20), host2).await;
 }

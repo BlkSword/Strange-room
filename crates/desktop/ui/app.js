@@ -124,7 +124,6 @@ $("start-receive").onclick = async () => {
     return;
   }
   showTransfer();
-  $("back-from-transfer").classList.add("hidden");
   try {
     await invoke("start_receive", { payload, dest });
   } catch (e) {
@@ -145,6 +144,8 @@ function showTransfer() {
   $("file-eta").textContent = "";
   $("overall-stats").textContent = "";
   $("peer").textContent = "正在连接…";
+  const cancelBtn = $("cancel-transfer");
+  if (cancelBtn) { cancelBtn.disabled = false; cancelBtn.textContent = "停止接收"; }
   startedAt = Date.now();
   show("screen-transfer");
 }
@@ -157,7 +158,14 @@ function showResult(title, body, hint) {
 }
 
 $("back-home").onclick = () => { paths = []; renderPaths(); show("screen-home"); };
-$("back-from-transfer").onclick = () => show("screen-home");
+// 停止接收：走内核的协作式取消，已下载的部分会保留，下次能续传
+$("cancel-transfer").onclick = async () => {
+  const btn = $("cancel-transfer");
+  btn.disabled = true;
+  btn.textContent = "正在停止…";
+  try { await invoke("cancel_transfer"); } catch (e) { btn.textContent = "停止接收"; }
+  // 真正的界面切换等后端发来事件，避免"点了却看不出发生了什么"
+};
 
 // 接收内核事件
 const listen = T.event?.listen;
@@ -168,7 +176,6 @@ if (listen) {
       case "peerConnected":
         $("peer").textContent = `${e.peer} 已连上 · 共 ${e.totalFiles} 个文件（${human(e.totalBytes)}）`;
         showTransfer();
-        $("back-from-transfer").classList.remove("hidden");
         break;
       case "fileStarted":
         $("cur-file").textContent =
@@ -203,13 +210,24 @@ if (listen) {
           ""
         );
         break;
-      case "failed":
-        showResult(
-          "没能完成",
-          e.message,
-          "如果提示指纹不匹配，说明二维码已过期或被改动，请让对方重新出示二维码。"
-        );
+      case "failed": {
+        // 用户主动停止不是失败，别用"没能完成"吓人，也别让他以为进度白丢了
+        const cancelled = String(e.message || "").includes("已取消");
+        if (cancelled) {
+          showResult(
+            "已停止",
+            "已接收的部分已经保留下来了。下次连接同一个分享，会自动从断点接着传。",
+            ""
+          );
+        } else {
+          showResult(
+            "没能完成",
+            e.message,
+            "如果提示指纹不匹配，说明二维码已过期或被改动，请让对方重新出示二维码。"
+          );
+        }
         break;
+      }
       case "warn":
         $("peer").textContent += ` · ${e.message}`;
         break;

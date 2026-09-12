@@ -15,6 +15,7 @@
 //! ```
 
 pub mod bytes;
+pub mod cancel;
 pub mod error;
 pub mod fs_util;
 pub mod identity;
@@ -24,6 +25,7 @@ pub mod protocol;
 pub mod qr;
 pub mod transfer;
 
+pub use cancel::CancelToken;
 pub use error::{Error, Result};
 pub use progress::{ProgressEvent, ProgressSender};
 pub use qr::{AddressHint, QrPayload};

@@ -230,12 +230,28 @@ async fn receive(
     let progress = ProgressSender::new();
     let renderer = ProgressRenderer::spawn(progress.subscribe());
 
+    // Ctrl+C 走"优雅停止"而不是直接被杀：已收的部分会保留，下次还能续传。
+    // 直接杀进程会留下过期的检查点，下次要么整段重传，要么更糟——
+    // 把不完整的数据当成完整的。
+    let cancel = sr_core::CancelToken::new();
+    {
+        let c = cancel.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                eprintln!();
+                eprintln!("收到中断，正在停止……已接收的部分会保留，下次可以接着传");
+                c.cancel();
+            }
+        });
+    }
+
     let result = Receiver::run(
         ReceiverOptions {
             payload,
             dest_dir: dest.clone(),
             device_name: name,
             continue_partial: !no_resume,
+            cancel,
         },
         &progress,
     )

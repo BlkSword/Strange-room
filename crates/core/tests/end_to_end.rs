@@ -87,6 +87,7 @@ async fn transfers_a_single_file_and_verifies_hash() {
             dest_dir: dst.clone(),
             device_name: "测试接收端".to_string(),
             continue_partial: true,
+            cancel: sr_core::CancelToken::new(),
         },
         &ProgressSender::new(),
     )
@@ -128,6 +129,7 @@ async fn transfers_a_folder_preserving_structure() {
             dest_dir: dst.clone(),
             device_name: "r".into(),
             continue_partial: true,
+            cancel: sr_core::CancelToken::new(),
         },
         &ProgressSender::new(),
     )
@@ -174,6 +176,7 @@ async fn refuses_to_connect_when_fingerprint_does_not_match() {
                 dest_dir: dst.clone(),
                 device_name: "r".into(),
                 continue_partial: true,
+                cancel: sr_core::CancelToken::new(),
             },
             &ProgressSender::new(),
         ),
@@ -236,6 +239,7 @@ async fn empty_files_are_handled() {
             dest_dir: dst.clone(),
             device_name: "r".into(),
             continue_partial: true,
+            cancel: sr_core::CancelToken::new(),
         },
         &ProgressSender::new(),
     )
@@ -275,6 +279,7 @@ async fn rejects_a_stale_session_id() {
                 dest_dir: dst.clone(),
                 device_name: "r".into(),
                 continue_partial: true,
+                cancel: sr_core::CancelToken::new(),
             },
             &ProgressSender::new(),
         ),

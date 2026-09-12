@@ -16,6 +16,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 
+use crate::cancel::CancelToken;
 use crate::error::{Error, Result};
 use crate::fs_util;
 use crate::progress::{ProgressEvent, ProgressSender};
@@ -513,6 +514,8 @@ pub struct ReceiverOptions {
     pub dest_dir: PathBuf,
     pub device_name: String,
     pub continue_partial: bool,
+    /// 取消信号。传 `CancelToken::new()` 表示不取消。
+    pub cancel: CancelToken,
 }
 
 pub struct Receiver;
@@ -531,6 +534,7 @@ impl Receiver {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         let mut round = 0u32;
         while conn.is_none() {
+            opts.cancel.check()?;
             round += 1;
             if round > 1 {
                 println!("主机暂时还连不上，正在重试（第 {round} 次）……如果主机刚结束上一个会话，请稍候几秒");
@@ -684,6 +688,7 @@ impl Receiver {
 
         let mut summary = TransferSummary::default();
         for entry in &manifest.files {
+            opts.cancel.check()?;
             let rel = fs_util::safe_relative_path(&entry.relative_path)?;
             let target = fs_util::join_checked(&opts.dest_dir, &rel);
             let part = fs_util::part_path(&target);
@@ -748,11 +753,17 @@ impl Receiver {
                 &mut state,
                 &opts.dest_dir,
                 progress,
+                &opts.cancel,
             )
             .await
             {
                 Ok(n) => n,
                 Err(e) => {
+                    // 取消不是"某个文件失败了"，而是整次接收停止：直接退出，
+                    // 绝不能记成失败后继续下一个文件
+                    if matches!(e, Error::Cancelled) {
+                        return Err(e);
+                    }
                     let msg = e.to_string();
                     summary.failures.push((entry.relative_path.clone(), msg.clone()));
                     let _ = write_frame(
@@ -838,6 +849,7 @@ async fn receive_one_file(
     state: &mut ResumeState,
     dest_dir: &Path,
     progress: &ProgressSender,
+    cancel: &CancelToken,
 ) -> Result<u64> {
     progress.send(ProgressEvent::FileStarted {
         file_id: file_id.to_string(),
@@ -932,6 +944,9 @@ async fn receive_one_file(
             }
             Err(e) => return Err(e),
         };
+
+        // 每收到一块检查一次：大文件传输时，这是唯一能及时停下的位置
+        cancel.check()?;
 
         match frame.kind {
             KIND_DATA => {

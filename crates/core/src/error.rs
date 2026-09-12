@@ -37,6 +37,9 @@ pub enum Error {
 
     #[error("序列化失败：{0}")]
     Serde(#[from] serde_json::Error),
+    #[error("已取消")]
+    Cancelled,
+
 
     #[error(transparent)]
     Other(#[from] anyhow::Error),
