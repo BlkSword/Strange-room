@@ -129,6 +129,12 @@ pub struct ClientHello {
     /// 会话 ID，来自二维码。主机用它确认对端扫的是当前这个会话。
     pub session_id: String,
     pub device_name: String,
+    /// TCP 回退下的车道号：0 = 我送对方取，1 = 对方送我取。
+    ///
+    /// QUIC 路径用不到它（两条流天然分开），所以固定发 0；给默认值是为了
+    /// 让"没这个字段"的旧握手也照常解析——加它不需要动协议版本。
+    #[serde(default)]
+    pub lane: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -253,6 +259,8 @@ mod tests {
     #[tokio::test]
     async fn json_messages_roundtrip() {
         let hello = ClientHello {
+            lane: 0,
+
             protocol_version: PROTOCOL_VERSION,
             session_id: "abc123".into(),
             device_name: "我的笔记本".into(),

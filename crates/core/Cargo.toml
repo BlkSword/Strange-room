@@ -28,6 +28,9 @@ mdns-sd = "0.21"
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "fs", "io-util", "sync", "macros", "time", "signal"] }
 tokio-util = { version = "0.7.19", features = ["io"] }
+# TCP 回退通道：把 QUIC 的一条双向流换成一条 TLS over TCP 连接。
+# 不用默认特性是为了避开 aws-lc-rs（Windows 上要 NASM），沿用 ring。
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 uuid = { version = "1.26.1", features = ["v4"] }
 walkdir = "2.5.0"
 

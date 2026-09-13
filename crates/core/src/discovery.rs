@@ -63,17 +63,23 @@ pub struct NearbyHost {
     pub addrs: Vec<AddressHint>,
     /// 与主机屏幕一致的 6 位验证码
     pub code: String,
+    /// 主机的 TCP 回退端口（TXT 里没写就是 None：对方是很老的版本）
+    pub tcp_port: Option<u16>,
 }
 
 impl NearbyHost {
     /// 转成和扫码一模一样的载荷——这样接收流程一行都不用改。
     pub fn payload(&self) -> QrPayload {
-        QrPayload::new(
+        let mut payload = QrPayload::new(
             self.sid.clone(),
             self.device_name.clone(),
             self.fingerprint.clone(),
             self.addrs.clone(),
-        )
+        );
+        // 走发现这条路时，TCP 回退端口来自 TXT：少了它，UDP 被封的网络里
+        // 明明有回退通道也用不上。
+        payload.tcp_port = self.tcp_port;
+        payload
     }
 
     /// 列表里的一行：`名字 · 验证码 427 913 · 192.168.1.9:51234`
@@ -106,6 +112,7 @@ impl Advertisement {
         sid: &str,
         fingerprint: &str,
         port: u16,
+        tcp_port: Option<u16>,
         addrs: &[AddressHint],
     ) -> Result<Self> {
         let ips: Vec<IpAddr> = addrs
@@ -132,6 +139,9 @@ impl Advertisement {
         props.insert("sid".to_string(), sid.to_string());
         props.insert("name".to_string(), truncate_utf8(device_name, 60));
         props.insert("fp".to_string(), fingerprint.to_string());
+        if let Some(tcp) = tcp_port {
+            props.insert("tcp".to_string(), tcp.to_string());
+        }
 
         let info = ServiceInfo::new(SERVICE_TYPE, &instance, &host_name, &ips[..], port, props)
             .map_err(|e| Error::protocol(format!("构造 mDNS 广播失败：{e}")))?;
@@ -227,6 +237,7 @@ fn host_from_resolved(info: &mdns_sd::ResolvedService) -> Option<NearbyHost> {
         info.get_property_val_str("sid"),
         info.get_property_val_str("name"),
         info.get_property_val_str("fp"),
+        info.get_property_val_str("tcp").and_then(|p| p.trim().parse().ok()),
         info.port,
         info.addresses.iter().map(|ip| ip.to_string()),
     )
@@ -238,6 +249,7 @@ fn host_from_parts(
     sid: Option<&str>,
     name: Option<&str>,
     fingerprint: Option<&str>,
+    tcp_port: Option<u16>,
     port: u16,
     raw_addrs: impl Iterator<Item = String>,
 ) -> Option<NearbyHost> {
@@ -248,7 +260,7 @@ fn host_from_parts(
             port,
         })
         .collect();
-    host_from_fields(version, sid, name, fingerprint, addrs)
+    host_from_fields(version, sid, name, fingerprint, tcp_port, addrs)
 }
 
 /// 这个地址值不值得试？
@@ -285,6 +297,7 @@ fn host_from_fields(
     sid: Option<&str>,
     name: Option<&str>,
     fingerprint: Option<&str>,
+    tcp_port: Option<u16>,
     addrs: Vec<AddressHint>,
 ) -> Option<NearbyHost> {
     if version != Some(TXT_VERSION) {
@@ -302,6 +315,7 @@ fn host_from_fields(
         fingerprint: fp.to_string(),
         addrs,
         code: verification_code(fp),
+        tcp_port,
     })
 }
 
@@ -370,6 +384,36 @@ mod tests {
     }
 
     #[test]
+    fn host_from_fields_carries_the_tcp_fallback_port() {
+        // TXT 里带 tcp 端口时必须原样带进载荷——否则"UDP 被封时自动回退"
+        // 在发现这条路上就断了：连接串里没有回退端口，客户端只会一直试 UDP。
+        let host = host_from_fields(
+            Some("1"),
+            Some("sid-1"),
+            Some("我的笔记本"),
+            Some("fp-1"),
+            Some(51235),
+            vec![hint("10.0.0.5")],
+        )
+        .expect("字段齐全时应当解析成功");
+        assert_eq!(host.tcp_port, Some(51235));
+        assert_eq!(host.payload().tcp_port, Some(51235));
+
+        // 老版本不带这个字段：None，客户端只会走 QUIC（向后兼容）
+        let old = host_from_fields(
+            Some("1"),
+            Some("sid-1"),
+            Some("我的笔记本"),
+            Some("fp-1"),
+            None,
+            vec![hint("10.0.0.5")],
+        )
+        .expect("没有 tcp 字段也应当解析成功");
+        assert_eq!(old.tcp_port, None);
+        assert_eq!(old.payload().tcp_port, None);
+    }
+
+    #[test]
     fn host_from_fields_requires_every_piece() {
         let good = || {
             host_from_fields(
@@ -377,6 +421,7 @@ mod tests {
                 Some("sid-1"),
                 Some("我的笔记本"),
                 Some("fp-1"),
+                None,
                 vec![hint("10.0.0.5")],
             )
         };
@@ -386,17 +431,17 @@ mod tests {
         assert_eq!(host.code, verification_code("fp-1"));
 
         // 任何一项缺失都不列出来——残缺信息只会变成看不懂的连接失败
-        assert!(host_from_fields(None, Some("s"), Some("n"), Some("f"), vec![hint("10.0.0.5")]).is_none());
-        assert!(host_from_fields(Some("1"), None, Some("n"), Some("f"), vec![hint("10.0.0.5")]).is_none());
-        assert!(host_from_fields(Some("1"), Some("s"), None, Some("f"), vec![hint("10.0.0.5")]).is_none());
-        assert!(host_from_fields(Some("1"), Some("s"), Some("n"), None, vec![hint("10.0.0.5")]).is_none());
-        assert!(host_from_fields(Some("1"), Some("s"), Some("n"), Some("f"), vec![]).is_none());
+        assert!(host_from_fields(None, Some("s"), Some("n"), Some("f"), None, vec![hint("10.0.0.5")]).is_none());
+        assert!(host_from_fields(Some("1"), None, Some("n"), Some("f"), None, vec![hint("10.0.0.5")]).is_none());
+        assert!(host_from_fields(Some("1"), Some("s"), None, Some("f"), None, vec![hint("10.0.0.5")]).is_none());
+        assert!(host_from_fields(Some("1"), Some("s"), Some("n"), None, None, vec![hint("10.0.0.5")]).is_none());
+        assert!(host_from_fields(Some("1"), Some("s"), Some("n"), Some("f"), None, vec![]).is_none());
         // 版本不认识：安静跳过，而不是当坏数据报错
-        assert!(host_from_fields(Some("2"), Some("s"), Some("n"), Some("f"), vec![hint("10.0.0.5")]).is_none());
+        assert!(host_from_fields(Some("2"), Some("s"), Some("n"), Some("f"), None, vec![hint("10.0.0.5")]).is_none());
         // 空白串等同缺失
-        assert!(host_from_fields(Some("1"), Some("  "), Some("n"), Some("f"), vec![hint("10.0.0.5")]).is_none());
+        assert!(host_from_fields(Some("1"), Some("  "), Some("n"), Some("f"), None, vec![hint("10.0.0.5")]).is_none());
         // 两头空白要去掉（mDNS 的 TXT 值可能有）
-        let host = host_from_fields(Some("1"), Some(" s "), Some(" n "), Some(" f "), vec![hint("10.0.0.5")])
+        let host = host_from_fields(Some("1"), Some(" s "), Some(" n "), Some(" f "), None, vec![hint("10.0.0.5")])
             .expect("应当容错空白");
         assert_eq!(host.sid, "s");
         assert_eq!(host.device_name, "n");
@@ -427,6 +472,7 @@ mod tests {
     #[test]
     fn display_line_shows_name_code_and_address() {
         let host = NearbyHost {
+            tcp_port: None,
             device_name: "笔记本".into(),
             sid: "s".into(),
             fingerprint: "fp".into(),
@@ -459,6 +505,7 @@ mod tests {
             Some("sid-9"),
             Some("台式机"),
             Some("fp-9"),
+            None,
             51234,
             raw.into_iter(),
         )
@@ -475,6 +522,7 @@ mod tests {
             Some("sid-9"),
             Some("台式机"),
             Some("fp-9"),
+            None,
             51234,
             vec!["127.0.0.1".to_string()].into_iter(),
         );
@@ -489,6 +537,7 @@ mod tests {
             "sid-1",
             "fp-1",
             51234,
+            None,
             &[hint("127.0.0.1")],
         )
         .err()
@@ -503,6 +552,7 @@ mod tests {
     #[test]
     fn payload_carries_everything_the_receive_flow_needs() {
         let host = NearbyHost {
+            tcp_port: None,
             device_name: "笔记本".into(),
             sid: "8f3c".into(),
             fingerprint: "d9df".into(),

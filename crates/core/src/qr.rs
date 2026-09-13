@@ -49,6 +49,14 @@ pub struct QrPayload {
     pub fp: String,
     /// 候选地址列表
     pub addrs: Vec<AddressHint>,
+    /// TCP 回退通道的端口（None = 对方没有 TCP 回退，或那份连接串来自更老的版本）。
+    ///
+    /// 为什么不复用 `addrs` 里的端口：主机能绑上同一个端口号最好，绑不上时
+    /// （那个 TCP 端口被别的程序占着）就用系统另给的端口，这里把真实端口带过去。
+    /// 老客户端不认识这个字段会直接忽略（serde 的默认行为），继续走 QUIC——
+    /// 所以加它不需要动协议版本。
+    #[serde(default)]
+    pub tcp_port: Option<u16>,
 }
 
 impl QrPayload {
@@ -64,7 +72,14 @@ impl QrPayload {
             name: device_name.into(),
             fp: fingerprint.into(),
             addrs,
+            tcp_port: None,
         }
+    }
+
+    /// 带上 TCP 回退端口（主机侧调用）。
+    pub fn with_tcp_port(mut self, port: u16) -> Self {
+        self.tcp_port = Some(port);
+        self
     }
 
     /// 编码为二维码内容 / 可粘贴的连接串。

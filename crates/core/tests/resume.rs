@@ -28,6 +28,9 @@ fn pseudo_random(len: usize, seed: u64) -> Vec<u8> { common::pseudo_random(len, 
 
 async fn start_host(plan: chuanmen_core::TransferPlan) -> HostSession {
     HostSession::start(HostOptions {
+
+        tcp_port: None,
+
         plan,
         device_name: "主机".to_string(),
         listen_port: 0,
@@ -41,7 +44,7 @@ async fn start_host(plan: chuanmen_core::TransferPlan) -> HostSession {
 
 fn payload_for(session: &HostSession) -> QrPayload {
     QrPayload::new(
-        session.session_id.clone(),
+        session.session_id().to_string(),
         session.device_name().to_string(),
         session.fingerprint().to_string(),
         vec![chuanmen_core::AddressHint {
@@ -121,7 +124,8 @@ async fn resumes_from_the_offset_recorded_on_disk() {
     // 注意：观察者任务持有 ProgressSender 的克隆，所以必须在接收结束后
     // 显式 drop 掉我们的 sender，否则 broadcast 通道永不关闭，observer 永不退出。
     let summary = Receiver::run(
-        ReceiverOptions {
+        ReceiverOptions {force_tcp: false,
+
             payload,
             dest_dir: dst.clone(),
             device_name: "接收端".into(),
@@ -218,7 +222,8 @@ async fn distrusts_a_checkpoint_that_does_not_match_the_disk() {
         tokio::spawn(async move { session.accept_once(&ProgressSender::new()).await });
 
     let summary = Receiver::run(
-        ReceiverOptions {
+        ReceiverOptions {force_tcp: false,
+
             payload,
             dest_dir: dst.clone(),
             device_name: "r".into(),
@@ -281,7 +286,8 @@ async fn cancel_stops_promptly_and_keeps_progress_for_resume() {
 
     let started = std::time::Instant::now();
     let result = Receiver::run(
-        ReceiverOptions {
+        ReceiverOptions {force_tcp: false,
+
             payload,
             dest_dir: dst.clone(),
             device_name: "接收端".into(),
@@ -340,7 +346,8 @@ async fn cancel_stops_promptly_and_keeps_progress_for_resume() {
     let host2 = tokio::spawn(async move { session2.accept_once(&ProgressSender::new()).await });
 
     let summary = Receiver::run(
-        ReceiverOptions {
+        ReceiverOptions {force_tcp: false,
+
             payload: payload2,
             dest_dir: dst.clone(),
             device_name: "接收端".into(),
@@ -369,11 +376,14 @@ async fn cancel_stops_promptly_and_keeps_progress_for_resume() {
 /// 这条守的是断点续传的"自动"那一半：进度留在盘上只是必要条件，用户还得手动重来
 /// 就不算真的能用——WiFi 抖一下、笔记本合盖，谁都可能遇到。
 ///
-/// 手法：主机第一个会话传到一半就把任务 abort 掉（等价于链路突然消失，不是优雅关闭），
-/// 然后继续举着二维码接下一个连接（现实中主机端一直开着）。断言：
-/// 1. 没有任何失败；
-/// 2. 最终文件逐字节一致；
+/// 手法：接收端确实落盘 8MB 之后，主机**直接关掉自己**（等价于主机进程被杀、
+/// 网线被拔），然后在同一个端口、同一个会话号上重新举二维码。断言：
+/// 1. 没有任何失败；2. 最终文件逐字节一致；
 /// 3. **补传的字节数小于文件总大小**——说明真的从断点续上了，而不是从头再传一遍。
+///
+/// 关于"同一个会话号"：真实重启不可能保留会话号，那时接收端必须重新扫码（已知限制）。
+/// 这条测试盯的是**接收端那一侧**：连接被真的掐断之后，它会不会自己重连、会不会
+/// 用上检查点。主机以同一个会话号重新起来，只是让这个场景可断言。
 #[tokio::test(flavor = "multi_thread")]
 async fn reconnects_and_resumes_after_a_real_interruption() {
     common::isolated_env();
@@ -388,46 +398,79 @@ async fn reconnects_and_resumes_after_a_real_interruption() {
     let plan = plan_paths(std::slice::from_ref(&file)).unwrap();
     let session = std::sync::Arc::new(start_host(plan).await);
     let payload = payload_for(&session);
+    let port = session.port();
+    let sid = session.session_id().to_string();
 
-    // 第一个会话：等**接收端确实收到并落盘了**再掐断。
-    //
-    // 关键是看接收端的进度，而不是主机的发送进度：主机"已经写进 QUIC 流"
-    // 不代表接收端已经读到——连接一断，还在缓冲区里的数据就没了，检查点会是 0。
-    // 那样重连之后就是从 0 重传，测的就不再是续传。
-    // 阈值取 8MB：既保证落盘，又留出足够余额（文件总共 48MB）。
-    let progress = ProgressSender::new();
-    let mut watcher = progress.subscribe();
+    // 第一台主机：后台接受连接。接受循环由第一次 accept_once 启动，
+    // 所以这一句必须发出去——哪怕我们不关心它的结果。
     let first = tokio::spawn({
         let session = session.clone();
         async move { session.accept_once(&ProgressSender::new()).await }
     });
-    let killer = tokio::spawn(async move {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
-            match tokio::time::timeout_at(deadline, watcher.recv()).await {
-                Ok(Ok(ProgressEvent::ChunkProgress { bytes_done, .. }))
-                    if bytes_done >= 8 * 1024 * 1024 =>
-                {
-                    break
+
+    // 关键的观察点：接收端**自己**的落盘进度。
+    //
+    // 不能看主机的发送进度：主机"已经写进 QUIC 流"不代表接收端已经读到——
+    // 连接一断，还在缓冲区里的数据就没了，检查点会是 0，那样重连之后就是从 0
+    // 重传，测的也不再是续传。阈值 8MB 既保证落盘，又给续传留足余额（总共 48MB）。
+    let progress = ProgressSender::new();
+    let mut watcher = progress.subscribe();
+    let killer = tokio::spawn({
+        let session = session.clone();
+        async move {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                match tokio::time::timeout_at(deadline, watcher.recv()).await {
+                    Ok(Ok(ProgressEvent::ChunkProgress { bytes_done, .. }))
+                        if bytes_done >= 8 * 1024 * 1024 =>
+                    {
+                        break
+                    }
+                    Ok(Ok(_)) => continue,
+                    _ => break,
                 }
-                Ok(Ok(_)) => continue,
-                _ => break,
             }
+            // 拔网线：不是优雅收尾，连接会直接断掉
+            session.close();
         }
-        first.abort();
     });
 
-    // 主机继续服务（真实场景里主机一直挂着二维码等人连）
-    let second = session.clone();
+    // 测试自己不再持有主机：`HostShared` 还活着的话，UDP 端口就不会释放，
+    // 后面那台"同端口重新起来"的主机会 bind 失败（真实使用里 HostSession 被
+    // drop 掉，端口自然就还回去了）。
+    drop(session);
+
+    // 第二台主机：同端口、同会话号，接着服务。
+    // 端口刚释放时可能还被内核占着一小会儿，所以这里退避重试几次。
     let host2 = tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        let r = second.accept_once(&ProgressSender::new()).await;
-        r
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        for _ in 0..30 {
+            let plan = plan_paths(std::slice::from_ref(&file)).unwrap();
+            let started = HostSession::start(HostOptions {
+                plan,
+                device_name: "测试主机".to_string(),
+                listen_port: port,
+                session_id: Some(sid.clone()),
+                once: true,
+                incoming_dir: None,
+                tcp_port: None,
+            })
+            .await;
+            match started {
+                Ok(host) => return Ok(host.accept_once(&ProgressSender::new()).await),
+                Err(e) => eprintln!("[test] 第二台主机启动失败：{e}"),
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        Err(chuanmen_core::Error::protocol(
+            "端口一直没释放，测试起不了第二台主机",
+        ))
     });
 
     let started = std::time::Instant::now();
     let summary = Receiver::run(
         ReceiverOptions {
+            force_tcp: false,
             payload,
             dest_dir: dst.clone(),
             device_name: "接收端".into(),
@@ -458,5 +501,6 @@ async fn reconnects_and_resumes_after_a_real_interruption() {
     assert_eq!(got, data, "重连续传后的内容必须逐字节一致");
 
     killer.await.ok();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(20), first).await;
     let _ = tokio::time::timeout(std::time::Duration::from_secs(20), host2).await;
 }

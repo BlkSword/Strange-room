@@ -30,6 +30,7 @@ async fn advertises_and_discovers_over_mdns() {
         &sid,
         fp,
         51234,
+        None,
         &[AddressHint {
             host: lan_ip.clone(),
             port: 51234,

@@ -25,6 +25,7 @@ use crate::qr::{AddressHint, QrPayload};
 use crate::transfer::plan::{ItemKind, TransferPlan};
 use crate::transfer::resume::{PartialFile, ResumeState, RESUME_FILE};
 
+use super::tcp::{self, TcpHost};
 use super::tls;
 
 /// 单次握手超时。QUIC 在证书被拒时会静默重试，没有这个超时用户只会看到"卡住"。
@@ -136,19 +137,52 @@ pub struct HostOptions {
     ///
     /// 这是第二级「双向共享空间」的开关：房间不该只是我单向往外掏东西。
     pub incoming_dir: Option<PathBuf>,
+    /// TCP 回退端口。`None` = 跟着 QUIC 的端口号走（同一个数字，TCP 与 UDP
+    /// 是两套协议，不冲突）；`Some(0)` = 让系统另挑一个空闲端口（测试用）。
+    ///
+    /// 回退通道起不来不算错误：主机自动退化成"只有 QUIC"，只是封 UDP 的网络里
+    /// 连不上——这种情况比"整个分享起不来"温和得多。
+    pub tcp_port: Option<u16>,
 }
 
-pub struct HostSession {
+/// 主机侧的共享状态：接受循环与每个会话任务都持有它。
+///
+/// 为什么要拆出来：主机现在同时跑三件事——QUIC 接受循环、TCP 回退接受循环、
+/// 以及每个会话自己的任务。会话不再阻塞在接受循环里，于是两件真实痛点消失了：
+/// - 接收端断线后想重连，不必等上一个会话走到空闲超时，接受循环一直是空的；
+/// - 多人同时连不再互相排队（原来是串行的：第二个要等第一个传完）。
+struct HostShared {
     endpoint: quinn::Endpoint,
     identity: crate::identity::Identity,
-    /// 会话开始时确定的文件清单。整个会话期间不变——这是"发送前先算好
-    /// 全部哈希"这个决定带来的直接好处：传输期间不需要再回头读盘。
+    /// 会话开始时确定的文件清单（整个会话期间不变）
     plan: TransferPlan,
     device_name: String,
-    /// 对方放东西的落点（见 HostOptions::incoming_dir）
+    /// 对方放东西的落点
     incoming_dir: Option<PathBuf>,
-    pub session_id: String,
-    pub port: u16,
+    session_id: String,
+    port: u16,
+    /// TCP 回退端口（None = 没起来，只能用 QUIC）
+    tcp_port: Option<u16>,
+    once: bool,
+    /// 整个主机作废：停止分享、进程退出。它会打断正在跑的会话。
+    cancel: CancelToken,
+    /// 只停"接受新连接"：`once` 用完就停，但让在跑的会话跑完。
+    stop_accept: CancelToken,
+    done_tx: tokio::sync::mpsc::UnboundedSender<Result<TransferSummary>>,
+    /// 第一次 `accept_once` 时注入。接受循环要跑在后台，必须先拿到它。
+    progress: std::sync::OnceLock<ProgressSender>,
+    /// 并发会话上限。房间是给人用的，不是给压测用的，这个数只是防呆。
+    limiter: Arc<tokio::sync::Semaphore>,
+    /// TCP 回退监听器：接受循环启动时被移进后台任务。
+    tcp: std::sync::Mutex<Option<TcpHost>>,
+}
+
+/// 一台主机最多同时服务多少个会话。
+const MAX_CONCURRENT_SESSIONS: usize = 16;
+
+pub struct HostSession {
+    shared: Arc<HostShared>,
+    done_rx: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<Result<TransferSummary>>>,
 }
 
 impl HostSession {
@@ -184,85 +218,338 @@ impl HostSession {
             .map_err(|e| Error::protocol(format!("获取本地端口失败: {e}")))?
             .port();
 
-        Ok(Self {
+        // TCP 回退通道。默认和 QUIC 用同一个端口号（TCP 与 UDP 是两套协议，
+        // 不冲突）；那个端口被别的程序占着时退化成"只有 QUIC"——回退通道是
+        // 兜底，绝不能因为它起不来就让整个分享失败。
+        let want = opts.tcp_port.unwrap_or(port);
+        let tcp = match TcpHost::bind(want, &identity).await {
+            Ok(t) => Some(t),
+            Err(e) => {
+                eprintln!("[主机] TCP 回退通道没能起来（只影响封掉 UDP 的网络）：{e}");
+                None
+            }
+        };
+
+        let (done_tx, done_rx) = tokio::sync::mpsc::unbounded_channel();
+        let shared = Arc::new(HostShared {
             endpoint,
             identity,
-            incoming_dir: opts.incoming_dir.clone(),
             plan: opts.plan,
             device_name: opts.device_name,
+            incoming_dir: opts.incoming_dir,
             session_id,
             port,
+            tcp_port: tcp.as_ref().map(|t| t.port()),
+            once: opts.once,
+            cancel: CancelToken::new(),
+            stop_accept: CancelToken::new(),
+            done_tx,
+            progress: std::sync::OnceLock::new(),
+            limiter: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_SESSIONS)),
+            tcp: std::sync::Mutex::new(tcp),
+        });
+        Ok(Self {
+            shared,
+            done_rx: tokio::sync::Mutex::new(done_rx),
         })
     }
 
     pub fn fingerprint(&self) -> &str {
-        &self.identity.fingerprint
+        &self.shared.identity.fingerprint
     }
 
     /// 本机设备名，用于二维码和握手。
     pub fn device_name(&self) -> &str {
-        &self.device_name
+        &self.shared.device_name
     }
 
     /// 本次会话要分享的清单（只读）。
     pub fn plan(&self) -> &TransferPlan {
-        &self.plan
+        &self.shared.plan
+    }
+
+    pub fn session_id(&self) -> &str {
+        &self.shared.session_id
     }
 
     pub fn qr_payload(&self) -> Result<QrPayload> {
-        Ok(QrPayload::new(
-            self.session_id.clone(),
-            self.device_name.clone(),
-            self.identity.fingerprint.clone(),
-            local_address_hints(self.port),
-        ))
+        let payload = QrPayload::new(
+            self.shared.session_id.clone(),
+            self.shared.device_name.clone(),
+            self.shared.identity.fingerprint.clone(),
+            local_address_hints(self.shared.port),
+        );
+        Ok(match self.shared.tcp_port {
+            Some(p) => payload.with_tcp_port(p),
+            None => payload,
+        })
     }
 
     pub fn port(&self) -> u16 {
-        self.port
+        self.shared.port
+    }
+
+    /// TCP 回退端口（None = 这台主机没有回退通道）。
+    pub fn tcp_port(&self) -> Option<u16> {
+        self.shared.tcp_port
     }
 
     pub fn endpoint(&self) -> &quinn::Endpoint {
-        &self.endpoint
+        &self.shared.endpoint
     }
 
-    /// 等待一次连接并完成传输。返回本次传输的结果摘要。
+    /// 等待**下一个结束的会话**，返回它的结果摘要。
+    ///
+    /// 对调用方来说语义和旧版"接受一次连接"一样（CLI 与桌面的循环都不用改），
+    /// 但底下换成了"后台接受循环 + 每个会话一个任务"：坏掉的客户端不会让主机
+    /// 停止服务，多人同时连也不会排队。
     pub async fn accept_once(&self, progress: &ProgressSender) -> Result<TransferSummary> {
-        // 循环直到拿到一个**握手成功**的连接。
-        //
-        // 关键点：握手失败（例如接收端刚连上就被强杀、或对方中途放弃）是正常现象，
-        // 不是主机的故障。这类错误绝不能冒泡出去让调用方停止服务——否则一个坏掉的
-        // 客户端就能让主机再也不接受任何连接，而用户完全不知道为什么"连不上了"。
-        loop {
-            let incoming = self
-                .endpoint
-                .accept()
-                .await
-                .ok_or_else(|| Error::protocol("监听已关闭"))?;
+        self.ensure_loops(progress);
+        let mut rx = self.done_rx.lock().await;
+        tokio::select! {
+            r = rx.recv() => r.unwrap_or_else(|| Err(Error::protocol("监听已关闭"))),
+            _ = self.shared.cancel.cancelled() => Err(Error::protocol("监听已关闭")),
+        }
+    }
 
-            match incoming.await {
-                Ok(conn) => {
-                    return serve_connection(
-                        conn,
-                        &self.session_id,
-                        &self.plan,
-                        &self.device_name,
-                        self.incoming_dir.as_deref(),
-                        progress,
-                    )
-                    .await;
-                }
-                Err(e) => {
-                    eprintln!("[主机] 忽略一次未完成的握手（对端可能刚连上就退出了）：{e}");
-                    continue;
-                }
-            }
+    /// 启动后台接受循环（幂等）。第一个调用者负责把 `ProgressSender` 交给循环。
+    fn ensure_loops(&self, progress: &ProgressSender) {
+        if self.shared.progress.set(progress.clone()).is_err() {
+            return;
+        }
+        let shared = self.shared.clone();
+        tokio::spawn(async move { quic_accept_loop(shared).await });
+
+        if let Some(tcp) = self.shared.tcp.lock().unwrap().take() {
+            let shared = self.shared.clone();
+            tokio::spawn(async move { tcp_accept_loop(shared, tcp).await });
         }
     }
 
     pub fn close(&self) {
-        self.endpoint.close(0u32.into(), b"done");
+        // 先叫停接受循环，再打断在跑的会话，最后关端点
+        self.shared.stop_accept.cancel();
+        self.shared.cancel.cancel();
+        self.shared.endpoint.close(0u32.into(), b"done");
     }
+}
+
+/// QUIC 接受循环：每来一个连接就开一个任务去服务它，循环本身永不阻塞在会话上。
+async fn quic_accept_loop(shared: Arc<HostShared>) {
+    loop {
+        let incoming = tokio::select! {
+            r = shared.endpoint.accept() => match r {
+                Some(i) => i,
+                None => break, // 端点已关闭
+            },
+            _ = shared.cancel.cancelled() => break,
+            _ = shared.stop_accept.cancelled() => break,
+        };
+
+        let shared2 = shared.clone();
+        tokio::spawn(async move {
+            let conn = match incoming.await {
+                Ok(c) => c,
+                Err(e) => {
+                    // 握手失败（对端刚连上就退出）是正常现象，绝不能让主机停摆
+                    eprintln!("[主机] 忽略一次未完成的握手（对端可能刚连上就退出了）：{e}");
+                    return;
+                }
+            };
+            let Ok(permit) = shared2.limiter.clone().acquire_owned().await else {
+                return;
+            };
+            let progress = shared2
+                .progress
+                .get()
+                .expect("接受循环启动前必须注入 ProgressSender")
+                .clone();
+            let result = serve_connection(
+                conn,
+                &shared2.session_id,
+                &shared2.plan,
+                &shared2.device_name,
+                shared2.incoming_dir.as_deref(),
+                &progress,
+            )
+            .await;
+            drop(permit);
+            finish_session(&shared2, result);
+        });
+    }
+}
+
+/// TCP 回退接受循环：每条连接就是一条"车道"。
+async fn tcp_accept_loop(shared: Arc<HostShared>, tcp: TcpHost) {
+    while !shared.cancel.is_cancelled() && !shared.stop_accept.is_cancelled() {
+        let lane = tokio::select! {
+            r = tcp.accept() => match r {
+                Ok(l) => l,
+                Err(e) => {
+                    // 对端连上就断（扫到一半取消、探测端口）很常见，
+                    // 不能让回退通道因此停摆
+                    eprintln!("[主机] TCP 回退通道这次没接住：{e}");
+                    continue;
+                }
+            },
+            _ = shared.cancel.cancelled() => break,
+            _ = shared.stop_accept.cancelled() => break,
+        };
+
+        let shared2 = shared.clone();
+        tokio::spawn(async move {
+            let Ok(permit) = shared2.limiter.clone().acquire_owned().await else {
+                return;
+            };
+            let result = serve_lane(&shared2, lane).await;
+            drop(permit);
+            finish_session(&shared2, result);
+        });
+    }
+}
+
+/// 一个会话结束了：把结果交给 `accept_once`，`once` 时顺手停掉接受循环。
+fn finish_session(shared: &Arc<HostShared>, result: Result<TransferSummary>) {
+    let _ = shared.done_tx.send(result);
+    if shared.once {
+        // `once` 的语义是"只服务一次"。停掉接受循环，但**不**打断在跑的会话：
+        // TCP 回退下两个方向是两条连接，刚结束的那条不该把另一条掐死。
+        shared.stop_accept.cancel();
+    }
+}
+
+/// 服务一条 TCP 车道：一条连接 = QUIC 里的一条双向流（一个方向）。
+///
+/// - `lane 0`：我送、对方取——和 QUIC 的 A 流一样（先给清单，再等 OFFER）；
+/// - `lane 1`：对方送、我取——和 QUIC 的 B 流一样（先读对方清单，再逐个取）。
+///
+/// 两条车道是两个独立任务，所以"我还在发大文件"的时候，对方也能把它的东西
+/// 塞过来；也正因为独立，每条车道都能单独报错、单独结束。
+async fn serve_lane(shared: &Arc<HostShared>, mut lane: tcp::Lane) -> Result<TransferSummary> {
+    let progress = shared
+        .progress
+        .get()
+        .expect("接受循环启动前必须注入 ProgressSender")
+        .clone();
+    let mut summary = TransferSummary::default();
+
+    // ---- 1. 握手（每条车道都要先自报身份）----
+    let frame = read_frame(&mut lane.recv)
+        .await?
+        .ok_or_else(|| Error::protocol("对端在握手前就断开了（TCP 回退）"))?;
+    let hello: ClientHello = frame.decode_json()?;
+    if hello.protocol_version != PROTOCOL_VERSION {
+        return Err(reject_lane(
+            &mut lane,
+            format!(
+                "对端协议版本 {} 与本机 {PROTOCOL_VERSION} 不匹配，请双方使用同一版本",
+                hello.protocol_version
+            ),
+        )
+        .await);
+    }
+    if hello.session_id != shared.session_id {
+        return Err(reject_lane(
+            &mut lane,
+            "二维码已过期（主机已经切换到新的会话），请重新扫描屏幕上的二维码".to_string(),
+        )
+        .await);
+    }
+    let server_hello = ServerHello {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: shared.session_id.clone(),
+        device_name: shared.device_name.clone(),
+        max_chunk_size: DEFAULT_CHUNK_SIZE,
+        accepts_incoming: shared.incoming_dir.is_some(),
+    };
+    write_frame(&mut lane.send, &Frame::json(KIND_HELLO, &server_hello)?).await?;
+
+    // 车道上的"对端没了"就是整台主机被取消。TCP 不需要轮询：对端进程被杀时
+    // 内核会给出 RST/FIN，读会自己返回；整机消失由 keepalive 兜底。
+    let live = Liveness::Tcp(shared.cancel.clone());
+
+    if hello.lane == 0 {
+        progress.send(ProgressEvent::SessionStarted {
+            peer: hello.device_name.clone(),
+            total_files: shared.plan.files.len(),
+            total_bytes: shared.plan.total_bytes,
+        });
+        let manifest = manifest_of(&shared.plan);
+        write_frame(&mut lane.send, &Frame::json(KIND_MANIFEST, &manifest)?).await?;
+        serve_items(
+            &live,
+            &mut lane.send,
+            &mut lane.recv,
+            &shared.plan,
+            &progress,
+            &mut summary,
+        )
+        .await?;
+        bye(&mut lane, "transfer complete").await;
+    } else {
+        let frame = read_frame(&mut lane.recv)
+            .await?
+            .ok_or_else(|| Error::protocol("对方在发送清单前就断开了（TCP 回退）"))?;
+        frame.expect_kind(KIND_MANIFEST, "对方清单")?;
+        let theirs: FileManifest = frame.decode_json()?;
+
+        if !theirs.files.is_empty() {
+            let Some(dir) = shared.incoming_dir.as_deref() else {
+                // 没指定接收目录时明确报错，而不是默默把对方的东西丢掉
+                let msg = "对方想往这里放东西，但这次分享没有指定接收目录（启动时用 --to 指定）"
+                    .to_string();
+                let _ = write_frame(
+                    &mut lane.send,
+                    &Frame::json(KIND_ERROR, &ErrorMsg { message: msg.clone() })?,
+                )
+                .await;
+                return Err(Error::protocol(msg));
+            };
+            // 主机这边没有协作式取消（取消走的是关连接），给一个不会被触发的
+            let cancel = CancelToken::new();
+            pull_items(
+                &live,
+                &mut lane.send,
+                &mut lane.recv,
+                &theirs.files,
+                dir,
+                &shared.session_id,
+                true,
+                DEFAULT_CHUNK_SIZE,
+                &progress,
+                &cancel,
+                &mut summary,
+            )
+            .await?;
+            // 收完把续传状态文件删掉：它只是辅助信息，留在对方目录里就是一道痕迹
+            let _ = std::fs::remove_file(dir.join(RESUME_FILE));
+        }
+        bye(&mut lane, "room items taken").await;
+    }
+
+    Ok(summary)
+}
+
+/// 在一条 TCP 车道上发 BYE 并关掉发送方向。对方可能已经先走了，失败无所谓。
+async fn bye(lane: &mut tcp::Lane, reason: &str) {
+    if let Ok(frame) = Frame::json(
+        KIND_BYE,
+        &Bye {
+            reason: Some(reason.to_string()),
+        },
+    ) {
+        let _ = write_frame(&mut lane.send, &frame).await;
+    }
+    let _ = lane.send.shutdown().await;
+}
+
+/// 明确拒绝一条 TCP 车道：把原因发过去，再关掉。
+async fn reject_lane(lane: &mut tcp::Lane, msg: String) -> Error {
+    if let Ok(frame) = Frame::json(KIND_ERROR, &ErrorMsg { message: msg.clone() }) {
+        let _ = write_frame(&mut lane.send, &frame).await;
+    }
+    let _ = lane.send.shutdown().await;
+    Error::protocol(msg)
 }
 
 #[derive(Debug, Default, Clone)]
@@ -283,6 +570,16 @@ pub struct TransferSummary {
     pub failures: Vec<(String, String)>,
 }
 
+impl TransferSummary {
+    /// 本次会话处理过的文本条目数（发出的 + 收到的）。
+    ///
+    /// 统一在这里算：文件与文本是两种东西，界面上必须分开说；两处各写一遍
+    /// 迟早会漂移（真机验收时就出现过"发了一段文本却显示 0 个文件"）。
+    pub fn text_count(&self) -> usize {
+        self.texts.len() + self.texts_sent
+    }
+}
+
 /// 主机侧：处理一条连接上的完整会话。
 /// 拒绝握手：把原因发给对端，并**等对端读完**再关闭连接。
 ///
@@ -301,6 +598,26 @@ async fn reject_handshake(
     // 给对端一点时间把错误读走，但绝不无限等
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), conn.closed()).await;
     Err(Error::protocol(msg))
+}
+
+/// 生成要发给对方的文件清单。
+///
+/// QUIC 与 TCP 回退两条通道发的是同一个东西，抽出来避免两处各写一遍。
+fn manifest_of(plan: &TransferPlan) -> FileManifest {
+    FileManifest {
+        files: plan
+            .files
+            .iter()
+            .map(|f| FileEntry {
+                file_id: f.file_id.clone(),
+                relative_path: f.relative_path.clone(),
+                size: f.size,
+                blake3: f.blake3.clone(),
+                kind: f.kind,
+            })
+            .collect(),
+        total_bytes: plan.total_bytes,
+    }
 }
 
 async fn serve_connection(
@@ -375,7 +692,10 @@ async fn serve_connection(
     let mut sent = TransferSummary::default();
     let mut fetched = TransferSummary::default();
 
-    let serve = serve_items(&conn, &mut send, &mut recv, plan, progress, &mut sent);
+    // 物品收发逻辑与传输通道无关：QUIC 与 TCP 回退共用同一套代码，
+    // 只是"对端是不是没了"的判断方式由 Liveness 决定。
+    let live = Liveness::Quic(conn.clone());
+    let serve = serve_items(&live, &mut send, &mut recv, plan, progress, &mut sent);
     let fetch = async {
         // 对端可能只开一条流（老版本，或这次没有东西要放）。版本号已经跟着涨了，
         // 这里等一小会儿只是为了：没有第二条流时不要空等到 QUIC 空闲超时。
@@ -412,7 +732,7 @@ async fn serve_connection(
             // 主机这边没有协作式取消（取消走的是关连接），给一个不会被触发的
             let cancel = CancelToken::new();
             pull_items(
-                &conn,
+                &live,
                 &mut send_b,
                 &mut recv_b,
                 &theirs.files,
@@ -464,8 +784,7 @@ async fn serve_connection(
     .await;
     let _ = send.finish();
 
-    // 文本条目单独计数：界面上"0 个文件"和"1 段文本"是两件事
-    let texts = summary.texts.len() + summary.texts_sent;
+    let texts = summary.text_count();
 
     progress.send(ProgressEvent::SessionFinished {
         files: summary.files_sent,
@@ -504,14 +823,18 @@ fn merge_summary(into: &mut TransferSummary, other: TransferSummary) {
 /// - 收到 BYE：会话该结束了；
 /// - 收到 MANIFEST：对方也要往房间里放东西（第二级：双向共享空间）。
 /// 这两个决定由调用方做——主机和接收端各有自己的下一步。
-async fn serve_items(
-    conn: &quinn::Connection,
-    send: &mut quinn::SendStream,
-    recv: &mut quinn::RecvStream,
+async fn serve_items<S, R>(
+    live: &Liveness,
+    send: &mut S,
+    recv: &mut R,
     plan: &TransferPlan,
     progress: &ProgressSender,
     summary: &mut TransferSummary,
-) -> Result<Option<Frame>> {
+) -> Result<Option<Frame>>
+where
+    S: tokio::io::AsyncWrite + Unpin + Send,
+    R: tokio::io::AsyncRead + Unpin + Send,
+{
     // 文本条目不占磁盘、也不是文件——结算时按"段"记账。
     // 先把清单里的文本 id 收出来，避免每个 OFFER 都去线性扫一遍清单。
     let text_ids: std::collections::HashSet<&str> = plan
@@ -524,7 +847,7 @@ async fn serve_items(
         // 收尾健壮性：接收端传完后可能直接关闭连接，此处的读会以
         // "连接丢失"结束。传输其实已经成功完成，不该当成错误——否则
         // 用户会遇到"文件明明收好了却报失败"。
-        let frame = match read_frame_watchdog(conn, recv).await {
+        let frame = match read_frame_guarded(live, recv).await {
             Ok(Some(f)) => f,
             Ok(None) => return Ok(None), // 对端正常关闭发送方向
             Err(e) if is_peer_gone(&e) => return Ok(None),
@@ -604,12 +927,15 @@ async fn serve_items(
 }
 
 /// 发送单个文件。`offer.have_bytes` 是接收端声明的续传起点。
-async fn send_one_file(
-    send: &mut quinn::SendStream,
+async fn send_one_file<S>(
+    send: &mut S,
     plan: &TransferPlan,
     offer: &FileOffer,
     progress: &ProgressSender,
-) -> Result<u64> {
+) -> Result<u64>
+where
+    S: tokio::io::AsyncWrite + Unpin + Send,
+{
     let planned = plan
         .files
         .iter()
@@ -739,9 +1065,36 @@ pub struct ReceiverOptions {
     pub outgoing: Option<TransferPlan>,
     /// 取消信号。传 `CancelToken::new()` 表示不取消。
     pub cancel: CancelToken,
+    /// 强制走 TCP 回退，跳过 QUIC。
+    ///
+    /// 用途：已经知道对方网络封了 UDP 时，省掉每次 8 秒的 QUIC 超时等待；
+    /// 也是测试里"只走回退通道"的开关。默认 false：先试 QUIC，连不上再自动
+    /// 回退——用户不需要知道这两种通道的区别。
+    pub force_tcp: bool,
 }
 
 pub struct Receiver;
+
+/// 本次会话用的是哪条通道。
+enum SessionTransport {
+    Quic {
+        conn: quinn::Connection,
+        _endpoint: quinn::Endpoint,
+    },
+    /// TCP 回退：lane 0 已经连上，lane 1 需要时再连
+    /// （两个方向各占一条 TCP 连接，理由见 net/tcp.rs）。
+    Tcp { lane: tcp::Lane, addr: SocketAddr },
+}
+
+/// 单次连接尝试的结果。
+///
+/// 把"换下一个地址再试"和"必须立刻停"分开，是为了不让安全问题（指纹不符）
+/// 被重试掩盖——那正是整个信任模型的地基。
+enum Attempt {
+    Ok(SessionTransport),
+    Retry(Error),
+    Fatal(Error),
+}
 
 impl Receiver {
     /// 连接主机、接收全部文件。返回摘要。
@@ -762,15 +1115,28 @@ impl Receiver {
         // 什么弄断的"——只留最后那句笼统的"连接超时"，会把人引向网络排查，
         // 而真实原因常常是对方已经把分享关了。
         let mut last_break: Option<String> = None;
+        // 哪条通道成功过就记住它：UDP 被封时，如果每次重连都先白等一次
+        // QUIC 超时，"自动续传"本身就成了新的折磨。
+        let mut prefer_tcp = opts.force_tcp;
         loop {
             attempt += 1;
-            let (conn, _endpoint) = match connect_to_host(&opts, progress).await {
-                Ok(pair) => pair,
+            let transport = match connect_to_host(&opts, progress, &mut prefer_tcp).await {
+                Ok(t) => t,
                 Err(e) => return Err(reconnect_failed(last_break.as_deref(), e)),
             };
-            let start = open_session(&conn, &opts, progress).await?;
 
-            match transfer_files(&conn, start, &opts, progress).await {
+            let outcome = match transport {
+                SessionTransport::Quic { conn, _endpoint } => {
+                    let start = open_session(&conn, &opts, progress).await?;
+                    transfer_files(&conn, start, &opts, progress).await
+                }
+                SessionTransport::Tcp { mut lane, addr } => {
+                    let start = open_session_tcp(&mut lane, &opts, progress).await?;
+                    transfer_files_tcp(&mut lane, addr, start, &opts, progress).await
+                }
+            };
+
+            match outcome {
                 Ok(summary) => return Ok(summary),
                 Err(e) if attempt < MAX_ATTEMPTS && is_retryable_interruption(&e) => {
                     // 退避 1s、2s、4s：短暂抖动一秒就够，真断了也不会让人干等
@@ -787,6 +1153,206 @@ impl Receiver {
                 Err(e) => return Err(e),
             }
         }
+    }
+}
+
+/// 连接到主机：轮询二维码里的候选地址，直到连上或者等够时间。
+///
+/// 单个地址上先试 QUIC，连不上再试 TCP 回退（同一条连接串里带着回退端口）。
+/// 已经知道 UDP 被封、或者这条通道之前成功过的，就直接从 TCP 开始。
+///
+/// 单独抽成函数，是因为**每次自动重连都要再走一遍**：主机被强杀时它要等空闲
+/// 超时才会空出来，这中间有几秒钟"主机还没准备好再接一个"的窗口。断线续传
+/// 的价值恰恰在"断了还能接上"，所以这里必须耐心等，而不是失败一次就报"连不上"。
+async fn connect_to_host(
+    opts: &ReceiverOptions,
+    progress: &ProgressSender,
+    prefer_tcp: &mut bool,
+) -> Result<SessionTransport> {
+    let mut last_err: Option<Error> = None;
+    let mut found: Option<SessionTransport> = None;
+
+    let deadline = std::time::Instant::now() + RECONNECT_BUDGET;
+    let mut round = 0u32;
+    while found.is_none() {
+        opts.cancel.check()?;
+        round += 1;
+        if round > 1 {
+            progress.send(ProgressEvent::Warn(format!(
+                "主机暂时还连不上，正在重试（第 {round} 次）……如果主机刚结束上一个会话，请稍候几秒"
+            )));
+        }
+
+        // 主机可能给了多个候选地址（多网卡），挨个试
+        for hint in &opts.payload.addrs {
+            let quic_addr = match tls::resolve_addr(&hint.host, hint.port).await {
+                Ok(a) => a,
+                Err(e) => {
+                    last_err = Some(e);
+                    continue;
+                }
+            };
+            // TCP 回退端口来自连接串（主机绑不上同一个端口时会另给一个）
+            let tcp_addr = match opts.payload.tcp_port {
+                Some(p) if p != hint.port => tls::resolve_addr(&hint.host, p).await.ok(),
+                _ => Some(quic_addr),
+            };
+
+            let mut order: Vec<(bool, SocketAddr)> = Vec::new(); // (是不是 TCP, 地址)
+            if *prefer_tcp {
+                if let Some(a) = tcp_addr {
+                    order.push((true, a));
+                }
+                if !opts.force_tcp {
+                    order.push((false, quic_addr));
+                }
+            } else {
+                order.push((false, quic_addr));
+                if let Some(a) = tcp_addr {
+                    order.push((true, a));
+                }
+            }
+
+            for (is_tcp, addr) in order {
+                let attempt = if is_tcp {
+                    try_tcp(opts, addr).await
+                } else {
+                    try_quic(opts, addr).await
+                };
+                match attempt {
+                    Attempt::Ok(t) => {
+                        if is_tcp {
+                            // 第一次回退成功时说一声：用户刚白等了一次 QUIC 超时，
+                            // 得让他知道那不是"卡了一下"，而是网络封了 UDP。
+                            if !*prefer_tcp && !opts.force_tcp {
+                                progress.send(ProgressEvent::Warn(
+                                    "UDP 那条路没走通，已自动改用 TCP 回退（对方网络可能封了 UDP）"
+                                        .to_string(),
+                                ));
+                            }
+                            *prefer_tcp = true;
+                        }
+                        found = Some(t);
+                        break;
+                    }
+                    Attempt::Retry(e) => last_err = Some(e),
+                    Attempt::Fatal(e) => return Err(e),
+                }
+            }
+            if found.is_some() {
+                break;
+            }
+        }
+
+        if found.is_none() {
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }
+
+    found.ok_or_else(|| {
+        last_err.unwrap_or_else(|| Error::protocol("无法连接到主机，二维码里的地址都试过了"))
+    })
+}
+
+/// 试一次 QUIC 连接。
+async fn try_quic(opts: &ReceiverOptions, addr: SocketAddr) -> Attempt {
+    let (client_cfg, fp_rejected) = match tls::client_config(&opts.payload.fp) {
+        Ok(v) => v,
+        Err(e) => return Attempt::Fatal(e),
+    };
+    let mut quinn_cfg = match quinn::crypto::rustls::QuicClientConfig::try_from(client_cfg) {
+        Ok(c) => quinn::ClientConfig::new(Arc::new(c)),
+        Err(e) => return Attempt::Fatal(Error::protocol(format!("QUIC 客户端配置失败: {e}"))),
+    };
+    quinn_cfg.transport_config(transport_config());
+
+    let sock = match bind_udp("0.0.0.0:0".parse().unwrap()) {
+        Ok(s) => s,
+        Err(e) => return Attempt::Retry(Error::protocol(format!("创建本地 UDP 端点失败: {e}"))),
+    };
+    let mut endpoint = match quinn::Endpoint::new(
+        quinn::EndpointConfig::default(),
+        None,
+        sock,
+        Arc::new(quinn::TokioRuntime),
+    ) {
+        Ok(e) => e,
+        Err(e) => return Attempt::Retry(Error::protocol(format!("创建本地 UDP 端点失败: {e}"))),
+    };
+    endpoint.set_default_client_config(quinn_cfg);
+
+    let connecting = match endpoint.connect(addr, crate::identity::SERVER_NAME) {
+        Ok(c) => c,
+        Err(e) => return Attempt::Retry(Error::protocol(format!("无法发起连接 {addr}：{e}"))),
+    };
+
+    // 三路竞速：连上、校验器判定指纹不符、整体超时。
+    //
+    // 为什么要单独听 `fp_rejected`：QUIC 在证书被拒时不会立刻报错，而是静默
+    // 重试到握手超时。只靠超时的话，一个"二维码过期"就要让用户干等十几秒，
+    // 还只能看到笼统的"连接超时"。
+    let flag_rx = fp_rejected.clone();
+    let outcome = tokio::select! {
+        r = connecting => Some(r),
+        _ = async {
+            loop {
+                if flag_rx.load(std::sync::atomic::Ordering::SeqCst) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        } => None,
+        _ = tokio::time::sleep(CONNECT_TIMEOUT) => None,
+    };
+
+    match outcome {
+        None if fp_rejected.load(std::sync::atomic::Ordering::SeqCst) => {
+            Attempt::Fatal(fingerprint_mismatch(opts))
+        }
+        None => Attempt::Retry(Error::protocol(format!(
+            "连接 {addr} 超时（{} 秒）。可能原因：双方不在同一局域网、主机已停止分享、或防火墙拦截了 UDP",
+            CONNECT_TIMEOUT.as_secs()
+        ))),
+        Some(Ok(conn)) => Attempt::Ok(SessionTransport::Quic {
+            conn,
+            _endpoint: endpoint,
+        }),
+        Some(Err(e)) => {
+            if is_fingerprint_mismatch(&e) {
+                Attempt::Fatal(fingerprint_mismatch(opts))
+            } else {
+                Attempt::Retry(tls::friendly_connect_error(addr, &e))
+            }
+        }
+    }
+}
+
+/// 试一次 TCP 回退连接。
+async fn try_tcp(opts: &ReceiverOptions, addr: SocketAddr) -> Attempt {
+    match tcp::dial(addr, &opts.payload.fp).await {
+        Ok((lane, fp_rejected)) => {
+            if fp_rejected.load(std::sync::atomic::Ordering::SeqCst) {
+                return Attempt::Fatal(fingerprint_mismatch(opts));
+            }
+            Attempt::Ok(SessionTransport::Tcp { lane, addr })
+        }
+        Err(e) => {
+            if is_fingerprint_mismatch_text(&e.to_string()) {
+                Attempt::Fatal(fingerprint_mismatch(opts))
+            } else {
+                Attempt::Retry(e)
+            }
+        }
+    }
+}
+
+fn fingerprint_mismatch(opts: &ReceiverOptions) -> Error {
+    Error::FingerprintMismatch {
+        expected: opts.payload.fp.clone(),
+        actual: "（主机出示的证书与连接串不一致）".into(),
     }
 }
 
@@ -813,129 +1379,206 @@ fn plain_message(e: &Error) -> String {
     }
 }
 
-/// 连接到主机：轮询二维码里的候选地址，直到连上或者等够时间。
+/// 一条 TCP 车道开场的产物：对方的清单 + 分块大小。
+struct TcpStart {
+    manifest: FileManifest,
+    max_chunk_size: u32,
+}
+
+/// 会话开场（TCP 版）：握手 + 拿对方清单。
 ///
-/// 单独抽成函数，是因为**每次自动重连都要再走一遍**：主机被强杀时它要等空闲超时
-/// 才会回到 `accept()`，这中间有几秒钟"主机还没准备好再接一个"的窗口。断线续传
-/// 的价值恰恰在"断了还能接上"，所以这里必须耐心等，而不是失败一次就报"连不上"。
-async fn connect_to_host(
+/// 这里和 QUIC 版（`open_session`）做的是同一件事，失败也**不自动重试**：
+/// 二维码过期、协议版本不符、对方没开接收目录——重试多少次结果都一样。
+async fn open_session_tcp(
+    lane: &mut tcp::Lane,
     opts: &ReceiverOptions,
     progress: &ProgressSender,
-) -> Result<(quinn::Connection, quinn::Endpoint)> {
-    let mut last_err: Option<Error> = None;
-    let mut conn = None;
+) -> Result<TcpStart> {
+    let hello = ClientHello {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: opts.payload.sid.clone(),
+        device_name: opts.device_name.clone(),
+        lane: 0,
+    };
+    write_frame(&mut lane.send, &Frame::json(KIND_HELLO, &hello)?).await?;
 
-    // 外层重试：接收端被强杀时，主机要等到空闲超时才会发现，之后才回到
-    // `accept()`。这中间有几秒钟"主机还没准备好再接一个"的窗口。
-    // 续传的价值恰恰在"断线后还能接上"，所以这里必须耐心等，而不是
-    // 失败一次就告诉用户"连不上"。
-    let deadline = std::time::Instant::now() + RECONNECT_BUDGET;
-    let mut round = 0u32;
-    while conn.is_none() {
-        opts.cancel.check()?;
-        round += 1;
-        if round > 1 {
-            progress.send(ProgressEvent::Warn(format!(
-                "主机暂时还连不上，正在重试（第 {round} 次）……如果主机刚结束上一个会话，请稍候几秒"
+    let frame = read_frame(&mut lane.recv)
+        .await?
+        .ok_or_else(|| Error::protocol("主机在握手阶段断开了连接（TCP 回退）"))?;
+    if frame.kind == KIND_ERROR {
+        let e: ErrorMsg = frame.decode_json()?;
+        return Err(Error::protocol(e.message));
+    }
+    frame.expect_kind(KIND_HELLO, "握手响应")?;
+    let server_hello: ServerHello = frame.decode_json()?;
+    if server_hello.protocol_version != PROTOCOL_VERSION {
+        return Err(Error::protocol(format!(
+            "主机协议版本 {} 与本机 {PROTOCOL_VERSION} 不匹配",
+            server_hello.protocol_version
+        )));
+    }
+    // 我带着东西来，对方却没开接收目录：用法错误，立刻说清楚
+    if opts.outgoing.is_some() && !server_hello.accepts_incoming {
+        return Err(Error::OfferRejected {
+            name: "我方要放进房间的东西".to_string(),
+            reason: "对方这次只往外分享，没有开接收目录（他启动时要加 --to 目录）".to_string(),
+        });
+    }
+
+    let frame = read_frame(&mut lane.recv)
+        .await?
+        .ok_or_else(|| Error::protocol("主机没有发送文件清单"))?;
+    frame.expect_kind(KIND_MANIFEST, "文件清单")?;
+    let manifest: FileManifest = frame.decode_json()?;
+    progress.send(ProgressEvent::SessionStarted {
+        peer: server_hello.device_name.clone(),
+        total_files: manifest.files.len(),
+        total_bytes: manifest.total_bytes,
+    });
+    Ok(TcpStart {
+        manifest,
+        max_chunk_size: server_hello.max_chunk_size,
+    })
+}
+
+/// 接收侧的收尾（QUIC 与 TCP 共用）：清掉续传状态、发出会话结束事件。
+///
+/// 全部成功才清状态文件：它只是"下次能少传一点"的辅助信息，留在用户目录里
+/// 就是一道痕迹，和"不留痕"的定位不符；有失败时保留，方便重连续传。
+fn finish_receiver(summary: &TransferSummary, opts: &ReceiverOptions, progress: &ProgressSender) {
+    if summary.failures.is_empty() {
+        let _ = std::fs::remove_file(opts.dest_dir.join(RESUME_FILE));
+    }
+    progress.send(ProgressEvent::SessionFinished {
+        files: summary.files_sent,
+        texts: summary.text_count(),
+        bytes: summary.bytes_sent,
+        failures: summary.failures.len(),
+    });
+}
+
+/// TCP 版的双向房间：两个方向各占一条 TCP 连接，跑起来和 QUIC 版一样是并发的。
+async fn transfer_files_tcp(
+    lane0: &mut tcp::Lane,
+    addr: SocketAddr,
+    start: TcpStart,
+    opts: &ReceiverOptions,
+    progress: &ProgressSender,
+) -> Result<TransferSummary> {
+    let TcpStart {
+        manifest,
+        max_chunk_size,
+    } = start;
+    let mut summary = TransferSummary::default();
+    let mut taken = TransferSummary::default();
+    let mut given = TransferSummary::default();
+    let live0 = Liveness::Tcp(opts.cancel.clone());
+
+    let take = async {
+        let r = pull_items(
+            &live0,
+            &mut lane0.send,
+            &mut lane0.recv,
+            &manifest.files,
+            &opts.dest_dir,
+            &opts.payload.sid,
+            opts.continue_partial,
+            max_chunk_size,
+            progress,
+            &opts.cancel,
+            &mut taken,
+        )
+        .await;
+        // 取完就告诉对方"这个方向结束了"：对方的发送循环靠这句话收尾
+        let _ = write_frame(
+            &mut lane0.send,
+            &Frame::json(
+                KIND_BYE,
+                &Bye {
+                    reason: Some("receiver done".into()),
+                },
+            )?,
+        )
+        .await;
+        let _ = lane0.send.shutdown().await;
+        r
+    };
+
+    let give = async {
+        // 只取不放时不开第二条连接：QUIC 开一条流是免费的，TCP 不是
+        let Some(outgoing_plan) = opts.outgoing.as_ref() else {
+            return Ok(());
+        };
+
+        let (mut lane1, fp_rejected) = tcp::dial(addr, &opts.payload.fp).await?;
+        if fp_rejected.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(fingerprint_mismatch(opts));
+        }
+        let hello = ClientHello {
+            protocol_version: PROTOCOL_VERSION,
+            session_id: opts.payload.sid.clone(),
+            device_name: opts.device_name.clone(),
+            lane: 1,
+        };
+        write_frame(&mut lane1.send, &Frame::json(KIND_HELLO, &hello)?).await?;
+        let frame = read_frame(&mut lane1.recv)
+            .await?
+            .ok_or_else(|| Error::protocol("主机在第二条车道的握手阶段断开了连接"))?;
+        if frame.kind == KIND_ERROR {
+            let e: ErrorMsg = frame.decode_json()?;
+            return Err(Error::protocol(e.message));
+        }
+        frame.expect_kind(KIND_HELLO, "握手响应")?;
+        let server_hello: ServerHello = frame.decode_json()?;
+        if server_hello.protocol_version != PROTOCOL_VERSION {
+            return Err(Error::protocol(format!(
+                "主机协议版本 {} 与本机 {PROTOCOL_VERSION} 不匹配",
+                server_hello.protocol_version
             )));
         }
 
-        // 主机可能给了多个候选地址（多网卡），挨个试
-        for hint in &opts.payload.addrs {
-            let addr = match tls::resolve_addr(&hint.host, hint.port).await {
-                Ok(a) => a,
-                Err(e) => {
-                    last_err = Some(e);
-                    continue;
-                }
-            };
+        // 空清单也要发：对方据此知道"这个方向没有东西可搬"，而不是一直等
+        let out_manifest = manifest_of(outgoing_plan);
+        write_frame(&mut lane1.send, &Frame::json(KIND_MANIFEST, &out_manifest)?).await?;
+        let live1 = Liveness::Tcp(opts.cancel.clone());
+        let r = serve_items(
+            &live1,
+            &mut lane1.send,
+            &mut lane1.recv,
+            outgoing_plan,
+            progress,
+            &mut given,
+        )
+        .await;
+        let _ = lane1.send.shutdown().await;
+        // 这个方向只要"有没有出错"，返回的最后一帧由 QUIC 版处理，这里不需要
+        r.map(|_| ())
+    };
 
-            let (client_cfg, fp_rejected) = tls::client_config(&opts.payload.fp)?;
-            let mut quinn_cfg = quinn::ClientConfig::new(Arc::new(
-                quinn::crypto::rustls::QuicClientConfig::try_from(client_cfg)
-                    .map_err(|e| Error::protocol(format!("QUIC 客户端配置失败: {e}")))?,
-            ));
-            quinn_cfg.transport_config(transport_config());
-
-            let sock = bind_udp("0.0.0.0:0".parse().unwrap())
-                .map_err(|e| Error::protocol(format!("创建本地 UDP 端点失败: {e}")))?;
-            let mut endpoint = quinn::Endpoint::new(
-                quinn::EndpointConfig::default(),
-                None,
-                sock,
-                Arc::new(quinn::TokioRuntime),
-            )
-            .map_err(|e| Error::protocol(format!("创建本地 UDP 端点失败: {e}")))?;
-            endpoint.set_default_client_config(quinn_cfg);
-
-            match endpoint.connect(addr, crate::identity::SERVER_NAME) {
-                Ok(connecting) => {
-                    // 三路竞速：连上、校验器判定指纹不符、整体超时。
-                    //
-                    // 为什么要单独听 `fp_rejected`：QUIC 在证书被拒时不会立刻
-                    // 报错，而是静默重试到握手超时。只靠超时的话，一个"二维码
-                    // 过期"就要让用户干等十几秒，还只能看到笼统的"连接超时"。
-                    let flag_rx = fp_rejected.clone();
-                    let outcome = tokio::select! {
-                        r = connecting => Some(r),
-                        _ = async {
-                            loop {
-                                if flag_rx.load(std::sync::atomic::Ordering::SeqCst) {
-                                    break;
-                                }
-                                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                            }
-                        } => None,
-                        _ = tokio::time::sleep(CONNECT_TIMEOUT) => {
-                            last_err = Some(Error::protocol(format!(
-                                "连接 {addr} 超时（{} 秒）。可能原因：双方不在同一局域网、主机已停止分享、或防火墙拦截了 UDP",
-                                CONNECT_TIMEOUT.as_secs()
-                            )));
-                            None
-                        }
-                    };
-
-                    match outcome {
-                        None if fp_rejected.load(std::sync::atomic::Ordering::SeqCst) => {
-                            // 指纹不符是安全问题，绝不能静默重试下一个地址
-                            return Err(Error::FingerprintMismatch {
-                                expected: opts.payload.fp.clone(),
-                                actual: "（主机出示的证书与二维码不一致）".into(),
-                            });
-                        }
-                        None => {}
-                        Some(Ok(c)) => {
-                            conn = Some((c, endpoint));
-                            break;
-                        }
-                        Some(Err(e)) => {
-                            if is_fingerprint_mismatch(&e) {
-                                return Err(Error::FingerprintMismatch {
-                                    expected: opts.payload.fp.clone(),
-                                    actual: "（主机出示的证书与二维码不一致）".into(),
-                                });
-                            }
-                            last_err = Some(tls::friendly_connect_error(addr, &e));
-                        }
-                    }
-                }
-                Err(e) => {
-                    last_err = Some(Error::protocol(format!("无法发起连接 {addr}：{e}")));
-                }
-            }
-        }
-
-        if conn.is_none() {
-            if std::time::Instant::now() >= deadline {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        }
+    // join 而不是 try_join：一个方向出错不该把另一个方向掐掉
+    let (taken_result, given_result) = tokio::join!(take, give);
+    merge_summary(&mut summary, taken);
+    merge_summary(&mut summary, given);
+    if let Err(e) = taken_result {
+        return Err(e);
     }
-// ---- SPLICE MARKER ----
-    conn.ok_or_else(|| {
-        last_err.unwrap_or_else(|| Error::protocol("无法连接到主机，二维码里的地址都试过了"))
-    })
+    if let Err(e) = given_result {
+        return Err(e);
+    }
+    finish_receiver(&summary, opts, progress);
+    Ok(summary)
+}
+
+/// 只认文字的"指纹不符"判断。
+///
+/// QUIC 抛的是 `quinn::ConnectionError`，TCP 回退抛的是 `std::io::Error`，
+/// 两种类型没有公共父类，只能看文字；再加上调用方手里的校验器标记位兜底，
+/// 两者取或，漏判概率就足够低了。
+fn is_fingerprint_mismatch_text(text: &str) -> bool {
+    text.contains("指纹")
+        || text.contains("fingerprint")
+        || text.contains("certificate")
+        || text.contains("证书")
 }
 
 /// 会话开场：交换问候、拿到文件清单、把续传状态准备好。
@@ -965,6 +1608,8 @@ async fn open_session(
         protocol_version: PROTOCOL_VERSION,
         session_id: opts.payload.sid.clone(),
         device_name: opts.device_name.clone(),
+        // QUIC 路径不用车道号：两条流天然分开
+        lane: 0,
     };
     write_frame(&mut send, &Frame::json(KIND_HELLO, &hello)?).await?;
 
@@ -1071,6 +1716,7 @@ async fn transfer_files(
     write_frame(&mut send_b, &Frame::json(KIND_MANIFEST, &out_manifest)?).await?;
 
     // 两个方向各记各的账，最后合并（同一个 summary 会被借用两次，Rust 也不允许）
+    let live = Liveness::Quic(conn.clone());
     let mut taken = TransferSummary::default();
     let mut given = TransferSummary::default();
     let empty_plan = TransferPlan::default();
@@ -1078,7 +1724,7 @@ async fn transfer_files(
 
     let take = async {
         let r = pull_items(
-            conn,
+            &live,
             &mut send,
             &mut recv,
             &manifest.files,
@@ -1107,7 +1753,7 @@ async fn transfer_files(
         r
     };
     let give = serve_items(
-        conn,
+        &live,
         &mut send_b,
         &mut recv_b,
         outgoing_plan,
@@ -1129,19 +1775,7 @@ async fn transfer_files(
         return Err(e);
     }
 
-    // 全部成功时把续传状态文件删掉：它只是"下次能少传一点"的辅助信息，
-    // 传完后留着既没有用，也和"不留痕"的定位不符（用户目录里平白多出一个
-    // 看不懂的 json）。有失败时保留，方便同一会话内重试续传。
-    if summary.failures.is_empty() {
-        let _ = std::fs::remove_file(opts.dest_dir.join(RESUME_FILE));
-    }
-
-    progress.send(ProgressEvent::SessionFinished {
-        files: summary.files_sent,
-        texts: summary.texts.len() + summary.texts_sent,
-        bytes: summary.bytes_sent,
-        failures: summary.failures.len(),
-    });
+    finish_receiver(&summary, opts, progress);
 
     // 主动关闭，不去等 conn.closed()：等它只会一直拖到 QUIC 空闲超时。
     conn.close(0u32.into(), b"done");
@@ -1217,10 +1851,10 @@ async fn prepare_target(part: &Path, total_size: u64, start_offset: u64) -> Resu
 /// 所以这段被抽出来复用：谁收东西谁调它，与它在会话里扮演什么角色无关。
 /// 战果累加到调用方传进来的 `summary` 上（一次会话可能两个方向都有收获）。
 #[allow(clippy::too_many_arguments)]
-async fn pull_items(
-    conn: &quinn::Connection,
-    send: &mut quinn::SendStream,
-    recv: &mut quinn::RecvStream,
+async fn pull_items<S, R>(
+    live: &Liveness,
+    send: &mut S,
+    recv: &mut R,
     entries: &[FileEntry],
     dest_dir: &Path,
     session_id: &str,
@@ -1229,7 +1863,11 @@ async fn pull_items(
     progress: &ProgressSender,
     cancel: &CancelToken,
     summary: &mut TransferSummary,
-) -> Result<()> {
+) -> Result<()>
+where
+    S: tokio::io::AsyncWrite + Unpin + Send,
+    R: tokio::io::AsyncRead + Unpin + Send,
+{
     // ---- 3. 准备续传状态 ----
     tokio::fs::create_dir_all(&dest_dir)
     .await
@@ -1251,7 +1889,7 @@ async fn pull_items(
             // 路径里不允许的字符），不该拿它去做路径校验。
             if entry.kind == ItemKind::Text {
                 match receive_text_item(
-                    &conn,
+                    live,
                     send,
                     recv,
                     entry,
@@ -1505,15 +2143,19 @@ async fn pull_items(
 /// 为什么复用文件那一套而不是另开"文本通道"：文本条目在协议上就是一个小文件，
 /// 复用意味着校验（BLAKE3）、分块、进度、结果确认只有一份实现。
 /// 区别只有：没有 `.part`、没有续传状态、内容进内存后交给界面。
-async fn receive_text_item(
-    conn: &quinn::Connection,
-    send: &mut quinn::SendStream,
-    recv: &mut quinn::RecvStream,
+async fn receive_text_item<S, R>(
+    live: &Liveness,
+    send: &mut S,
+    recv: &mut R,
     entry: &FileEntry,
     chunk_size: u32,
     progress: &ProgressSender,
     cancel: &CancelToken,
-) -> Result<String> {
+) -> Result<String>
+where
+    S: tokio::io::AsyncWrite + Unpin + Send,
+    R: tokio::io::AsyncRead + Unpin + Send,
+{
     let offer = FileOffer {
         file_id: entry.file_id.clone(),
         relative_path: entry.relative_path.clone(),
@@ -1545,7 +2187,7 @@ async fn receive_text_item(
 
     loop {
         cancel.check()?;
-        let Some(frame) = read_frame_watchdog(conn, recv).await? else {
+        let Some(frame) = read_frame_guarded(live, recv).await? else {
             return Err(Error::Disconnected {
                 received: out.len() as u64,
                 total: entry.size,
@@ -1604,8 +2246,8 @@ async fn receive_text_item(
 
 /// 接收单个文件：协商好的偏移开始，流式写 `.part`，每块之后写检查点。
 #[allow(clippy::too_many_arguments)]
-async fn receive_one_file(
-    recv: &mut quinn::RecvStream,
+async fn receive_one_file<R>(
+    recv: &mut R,
     file_id: &str,
     relative_path: &str,
     target: &Path,
@@ -1617,7 +2259,10 @@ async fn receive_one_file(
     dest_dir: &Path,
     progress: &ProgressSender,
     cancel: &CancelToken,
-) -> Result<u64> {
+) -> Result<u64>
+where
+    R: tokio::io::AsyncRead + Unpin + Send,
+{
     progress.send(ProgressEvent::FileStarted {
         file_id: file_id.to_string(),
         relative_path: relative_path.to_string(),
@@ -1824,20 +2469,60 @@ async fn receive_one_file(
 /// 结果就是：接收端想重连续传，主机却在原地等三十多秒——续传等于不可用。
 ///
 /// 解法：每次读最多等 500ms，超时就检查一次连接是否已经关闭，是则立刻返回。
-async fn read_frame_watchdog(
-    conn: &quinn::Connection,
-    recv: &mut quinn::RecvStream,
-) -> Result<Option<Frame>> {
+async fn read_frame_watchdog<R>(
+    live: &Liveness,
+    recv: &mut R,
+) -> Result<Option<Frame>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
     loop {
         match tokio::time::timeout(std::time::Duration::from_millis(500), read_frame(recv)).await {
             Ok(r) => return r,
             Err(_) => {
-                if conn.close_reason().is_some() {
+                if live.is_closed() {
                     // 对端已经走了：让调用方按"正常收尾"处理
                     return Ok(None);
                 }
             }
         }
+    }
+}
+
+/// "这条连接还能用吗"——物品收发逻辑要同时跑在 QUIC 与 TCP 回退上，
+/// 而两边判断"对端没了"的方式完全不同：
+///
+/// - QUIC：对端进程被强杀时不会有任何事件，只能定期问 `close_reason()`；
+/// - TCP：内核会给出 EOF/RST，读自己就会返回。**绝不能**在 TCP 上套 500ms
+///   轮询超时——那会在读到一半时把帧撕开，后面的字节全部错位（静默数据损坏）。
+#[derive(Clone)]
+enum Liveness {
+    Quic(quinn::Connection),
+    /// TCP 回退通道：只需要一个"整条会话作废"的信号。
+    /// 取消意味着这条流不会再被使用，所以这时丢掉读到一半的帧是安全的。
+    Tcp(crate::cancel::CancelToken),
+}
+
+impl Liveness {
+    fn is_closed(&self) -> bool {
+        match self {
+            Liveness::Quic(c) => c.close_reason().is_some(),
+            Liveness::Tcp(t) => t.is_cancelled(),
+        }
+    }
+}
+
+/// 读一帧，并在"对端消失 / 会话被取消"时及时返回 `None`。
+async fn read_frame_guarded<R>(live: &Liveness, recv: &mut R) -> Result<Option<Frame>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    match live {
+        Liveness::Quic(_) => read_frame_watchdog(live, recv).await,
+        Liveness::Tcp(token) => tokio::select! {
+            r = read_frame(recv) => r,
+            _ = token.cancelled() => Ok(None),
+        },
     }
 }
 /// 判断一个错误是否只是"对端已经走了"。
@@ -1859,18 +2544,17 @@ fn is_peer_gone(e: &Error) -> bool {
 /// 漏判的代价是要让用户白等一轮超时，而且会被当成"网络问题"重试。
 /// 另外调用方还会用校验器的标记位兜底（那个比字符串可靠），两者取或。
 fn is_fingerprint_mismatch(e: &quinn::ConnectionError) -> bool {
-    let text = format!("{e}");
-    text.contains("指纹")
-        || text.contains("fingerprint")
-        || text.contains("certificate")
-        || text.contains("证书")
+    is_fingerprint_mismatch_text(&e.to_string())
 }
 
 /// 等待主机对某个文件结果的确认，保持会话收发同步。
 ///
 /// 主机在发完一个文件后会回一个 RESULT。接收端必须读掉它——否则下一个
 /// OFFER 会和这个未读的 RESULT 错位，表现为"收到意外的帧类型"。
-async fn drain_result(recv: &mut quinn::RecvStream, file_id: &str) -> Result<()> {
+async fn drain_result<R>(recv: &mut R, file_id: &str) -> Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
     loop {
         // 对端已经走了（文件其实已经收完，主机直接关了连接）：按正常结束处理
         let frame = match read_frame(recv).await {

@@ -28,6 +28,8 @@ fn pseudo_random(len: usize, seed: u64) -> Vec<u8> { common::pseudo_random(len, 
 /// 起一个主机会话，拿到可以在本机连上的二维码载荷。
 async fn start_host(plan: TransferPlan) -> HostSession {
     let session = HostSession::start(HostOptions {
+        tcp_port: None,
+
         plan,
         device_name: "测试主机".to_string(),
         listen_port: 0, // 随机端口，避免测试之间抢端口
@@ -45,7 +47,7 @@ async fn start_host(plan: TransferPlan) -> HostSession {
 
 fn local_payload(session: &HostSession) -> QrPayload {
     QrPayload::new(
-        session.session_id.clone(),
+        session.session_id().to_string(),
         session.device_name().to_string(),
         session.fingerprint().to_string(),
         vec![chuanmen_core::AddressHint {
@@ -53,6 +55,57 @@ fn local_payload(session: &HostSession) -> QrPayload {
             port: session.port(),
         }],
     )
+}
+
+
+/// 和 `local_payload` 一样，但带上 TCP 回退端口（走回退通道要用它）。
+fn local_payload_tcp(session: &HostSession) -> QrPayload {
+    let port = session.tcp_port().expect("这台主机没有 TCP 回退端口");
+    local_payload(session).with_tcp_port(port)
+}
+
+/// 起一台支持 TCP 回退、并且两个方向都能继续服务的测试主机。
+///
+/// `once: false`：TCP 回退下两个方向是两条独立连接，"只接一次"会让第二个方向
+/// 没人接（真实场景里主机一直挂着，本来就是 non-once）。
+/// `tcp_port: Some(0)`：让系统另挑一个端口，这样才能构造"UDP 是死的、TCP 是活的"
+/// 这种真实场景来验证自动回退。
+async fn start_host_tcp(plan: TransferPlan) -> HostSession {
+    HostSession::start(HostOptions {
+        tcp_port: Some(0),
+        plan,
+        device_name: "测试主机".to_string(),
+        listen_port: 0,
+        session_id: None,
+        once: false,
+        incoming_dir: None,
+    })
+    .await
+    .expect("主机启动失败")
+}
+
+/// 让主机一直服务到测试结束。
+///
+/// TCP 回退下两个方向是两条独立连接 = 两次 `accept_once`，只接一次就会在
+/// 第一条车道结束时把整个会话 drop 掉，另一条从中间被掐断（测试会变得飘忽）。
+fn serve_until_closed(session: std::sync::Arc<HostSession>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let progress = ProgressSender::new();
+        while session.accept_once(&progress).await.is_ok() {}
+    })
+}
+
+/// 等一个文件出现并达到预期长度（最多等 10 秒）。
+async fn wait_for_file(path: &Path, len: usize) -> bool {
+    for _ in 0..200 {
+        if let Ok(meta) = std::fs::metadata(path) {
+            if meta.len() as usize == len {
+                return true;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
 }
 
 fn spawn_host_task(session: HostSession) -> tokio::task::JoinHandle<chuanmen_core::Result<TransferSummary>> {
@@ -86,7 +139,8 @@ async fn skips_files_already_correctly_in_place() {
     let payload = local_payload(&session);
     let host = spawn_host_task(session);
     let first = Receiver::run(
-        ReceiverOptions {
+        ReceiverOptions {force_tcp: false,
+
             payload: payload.clone(),
             dest_dir: dst.clone(),
             device_name: "r".into(),
@@ -108,7 +162,8 @@ async fn skips_files_already_correctly_in_place() {
     let payload = local_payload(&session);
     let host = spawn_host_task(session);
     let second = Receiver::run(
-        ReceiverOptions {
+        ReceiverOptions {force_tcp: false,
+
             payload,
             dest_dir: dst.clone(),
             device_name: "r".into(),
@@ -161,6 +216,8 @@ async fn both_sides_can_put_things_into_the_room() {
 
     // 主机这次指定了"对方放东西的落点"，所以它也会收到东西
     let session = HostSession::start(HostOptions {
+        tcp_port: None,
+
         plan: host_plan,
         device_name: "测试主机".to_string(),
         listen_port: 0,
@@ -174,7 +231,8 @@ async fn both_sides_can_put_things_into_the_room() {
     let host = spawn_host_task(session);
 
     let summary = Receiver::run(
-        ReceiverOptions {
+        ReceiverOptions {force_tcp: false,
+
             payload,
             dest_dir: guest_dir.clone(),
             device_name: "测试接收端".to_string(),
@@ -245,7 +303,8 @@ async fn transfers_a_text_item_alongside_a_file() {
     let host = spawn_host_task(session);
 
     let summary = Receiver::run(
-        ReceiverOptions {
+        ReceiverOptions {force_tcp: false,
+
             payload,
             dest_dir: dst.clone(),
             device_name: "测试接收端".to_string(),
@@ -299,7 +358,8 @@ async fn transfers_a_single_file_and_verifies_hash() {
     let host = spawn_host_task(session);
 
     let summary = Receiver::run(
-        ReceiverOptions {
+        ReceiverOptions {force_tcp: false,
+
             payload,
             dest_dir: dst.clone(),
             device_name: "测试接收端".to_string(),
@@ -356,7 +416,8 @@ async fn a_blocked_destination_skips_that_file_without_breaking_the_session() {
     let host = spawn_host_task(session);
 
     let summary = Receiver::run(
-        ReceiverOptions {
+        ReceiverOptions {force_tcp: false,
+
             payload,
             dest_dir: dst.clone(),
             device_name: "r".into(),
@@ -404,7 +465,8 @@ async fn transfers_a_folder_preserving_structure() {
     let host = spawn_host_task(session);
 
     let summary = Receiver::run(
-        ReceiverOptions {
+        ReceiverOptions {force_tcp: false,
+
             payload,
             dest_dir: dst.clone(),
             device_name: "r".into(),
@@ -452,7 +514,8 @@ async fn refuses_to_connect_when_fingerprint_does_not_match() {
     let result = tokio::time::timeout(
         Duration::from_secs(20),
         Receiver::run(
-            ReceiverOptions {
+            ReceiverOptions {force_tcp: false,
+
                 payload,
                 dest_dir: dst.clone(),
                 device_name: "r".into(),
@@ -516,7 +579,8 @@ async fn empty_files_are_handled() {
     let host = spawn_host_task(session);
 
     let summary = Receiver::run(
-        ReceiverOptions {
+        ReceiverOptions {force_tcp: false,
+
             payload,
             dest_dir: dst.clone(),
             device_name: "r".into(),
@@ -557,7 +621,8 @@ async fn rejects_a_stale_session_id() {
     let result = tokio::time::timeout(
         Duration::from_secs(30),
         Receiver::run(
-            ReceiverOptions {
+            ReceiverOptions {force_tcp: false,
+
                 payload,
                 dest_dir: dst.clone(),
                 device_name: "r".into(),
@@ -676,7 +741,8 @@ async fn a_sent_text_is_counted_as_text_not_as_a_file() {
     let host = spawn_host_task(session);
 
     let summary = Receiver::run(
-        ReceiverOptions {
+        ReceiverOptions {force_tcp: false,
+
             payload,
             dest_dir: dst.clone(),
             device_name: "r".into(),
@@ -698,4 +764,182 @@ async fn a_sent_text_is_counted_as_text_not_as_a_file() {
         host_summary.texts_sent, 1,
         "文本要单独记在 texts_sent 里，不能算成文件"
     );
+}
+
+// ==================== TCP 回退通道 ====================
+
+/// 强制走 TCP 回退：文件能过去，字节一致。
+///
+/// 这条通道存在的理由：QUIC 走 UDP，而企业网络、访客 WiFi、部分 VPN 会把 UDP
+/// 直接封掉。没有回退路径时，产品在这些网络里就是"连不上"。
+#[tokio::test]
+async fn transfers_a_file_over_the_tcp_fallback() {
+    common::isolated_env();
+    let (_src_guard, src) = tmp();
+    let (_dst_guard, dst) = tmp();
+
+    let data = pseudo_random(300_000, 777);
+    let file = src.join("tcp.bin");
+    write_file(&file, &data);
+
+    let plan = plan_paths(&[file]).unwrap();
+    let session = std::sync::Arc::new(start_host_tcp(plan).await);
+    let payload = local_payload_tcp(&session);
+    let host = serve_until_closed(session.clone());
+
+    let summary = Receiver::run(
+        ReceiverOptions {
+            force_tcp: true,
+            payload,
+            dest_dir: dst.clone(),
+            device_name: "r".into(),
+            continue_partial: true,
+            outgoing: None,
+            cancel: chuanmen_core::CancelToken::new(),
+        },
+        &ProgressSender::new(),
+    )
+    .await
+    .expect("TCP 回退接收失败");
+
+    assert!(summary.failures.is_empty(), "{:?}", summary.failures);
+    assert_eq!(summary.received_files, 1);
+    assert_eq!(
+        std::fs::read(dst.join("tcp.bin")).unwrap(),
+        data,
+        "TCP 回退传过来的内容必须逐字节一致"
+    );
+
+    session.close();
+    let _ = host.await;
+}
+
+/// TCP 回退下的双向房间：两个方向各占一条 TCP 连接，互不排队。
+#[tokio::test]
+async fn both_sides_can_put_things_into_the_room_over_tcp() {
+    common::isolated_env();
+    let (_src_guard, src) = tmp();
+    let (_dst_guard, dst) = tmp();
+    let (_host_guard, host_dir) = tmp();
+
+    let data_a = pseudo_random(180_000, 901);
+    let file_a = src.join("host.bin");
+    write_file(&file_a, &data_a);
+    let mut host_plan = plan_paths(&[file_a]).unwrap();
+    chuanmen_core::transfer::plan::append_text(&mut host_plan, "一段文本", "主机放的文字").unwrap();
+
+    let data_b = pseudo_random(90_000, 902);
+    let file_b = src.join("guest.bin");
+    write_file(&file_b, &data_b);
+    let mut guest_plan = plan_paths(&[file_b]).unwrap();
+    chuanmen_core::transfer::plan::append_text(&mut guest_plan, "一个链接", "https://guest.example/tcp")
+        .unwrap();
+
+    let session = std::sync::Arc::new(
+        HostSession::start(HostOptions {
+            tcp_port: Some(0),
+            plan: host_plan,
+            device_name: "测试主机".to_string(),
+            listen_port: 0,
+            session_id: None,
+            once: false,
+            incoming_dir: Some(host_dir.clone()),
+        })
+        .await
+        .expect("主机启动失败"),
+    );
+    let payload = local_payload_tcp(&session);
+    let host = serve_until_closed(session.clone());
+
+    let summary = Receiver::run(
+        ReceiverOptions {
+            force_tcp: true,
+            payload,
+            dest_dir: dst.clone(),
+            device_name: "r".into(),
+            continue_partial: true,
+            outgoing: Some(guest_plan),
+            cancel: chuanmen_core::CancelToken::new(),
+        },
+        &ProgressSender::new(),
+    )
+    .await
+    .expect("TCP 回退下的双向房间失败");
+
+    assert!(summary.failures.is_empty(), "{:?}", summary.failures);
+    assert_eq!(summary.received_files, 1, "接收端该拿到主机放的文件");
+    assert_eq!(std::fs::read(dst.join("host.bin")).unwrap(), data_a);
+    assert_eq!(summary.texts.len(), 1, "接收端该收到主机放的文本");
+    assert_eq!(summary.texts[0].1, "主机放的文字");
+    assert!(summary.files_sent > summary.received_files, "接收端放进去的东西也该被处理");
+
+    // 主机侧：等文件真的落盘（对方取完会发 BYE，这个文件就是那条车道的战果）
+    let landed = wait_for_file(&host_dir.join("guest.bin"), data_b.len()).await;
+    assert!(landed, "主机没有收到对方放进来的文件");
+    assert_eq!(std::fs::read(host_dir.join("guest.bin")).unwrap(), data_b);
+
+    session.close();
+    let _ = host.await;
+}
+
+/// 真的回退：连接串里的 QUIC 地址指向一个没人听的端口，客户端必须自己
+/// 退到 TCP 上把文件拿回来。
+///
+/// 这条测的是"回退"本身——上面两条都是强制走 TCP，只证明了通道能用，
+/// 没证明"UDP 走不通时会自己换路"。
+#[tokio::test]
+async fn falls_back_to_tcp_when_udp_goes_nowhere() {
+    common::isolated_env();
+    let (_src_guard, src) = tmp();
+    let (_dst_guard, dst) = tmp();
+
+    let data = pseudo_random(200_000, 903);
+    let file = src.join("fallback.bin");
+    write_file(&file, &data);
+
+    let plan = plan_paths(&[file]).unwrap();
+    let session = std::sync::Arc::new(start_host_tcp(plan).await);
+    let tcp_port = session.tcp_port().expect("主机必须有 TCP 回退端口");
+
+    // 一个"确定没人听"的 UDP 端口：借一个系统分配的端口再立刻还回去
+    let dead_port = {
+        let probe = std::net::UdpSocket::bind("127.0.0.1:0").expect("借端口失败");
+        probe.local_addr().unwrap().port()
+    };
+    assert_ne!(dead_port, tcp_port, "借到的端口不能正好是回退端口");
+
+    // 连接串：QUIC 地址是死的，TCP 回退端口是活的
+    let payload = QrPayload::new(
+        session.session_id().to_string(),
+        session.device_name().to_string(),
+        session.fingerprint().to_string(),
+        vec![chuanmen_core::AddressHint {
+            host: "127.0.0.1".to_string(),
+            port: dead_port,
+        }],
+    )
+    .with_tcp_port(tcp_port);
+
+    let host = serve_until_closed(session.clone());
+
+    let summary = Receiver::run(
+        ReceiverOptions {
+            force_tcp: false, // 关键：先试 QUIC，失败后自己回退
+            payload,
+            dest_dir: dst.clone(),
+            device_name: "r".into(),
+            continue_partial: true,
+            outgoing: None,
+            cancel: chuanmen_core::CancelToken::new(),
+        },
+        &ProgressSender::new(),
+    )
+    .await
+    .expect("UDP 走不通时应当自己退到 TCP，而不是直接失败");
+
+    assert!(summary.failures.is_empty(), "{:?}", summary.failures);
+    assert_eq!(std::fs::read(dst.join("fallback.bin")).unwrap(), data);
+
+    session.close();
+    let _ = host.await;
 }

@@ -18,9 +18,32 @@ use std::sync::Arc;
 use crate::error::{Error, Result};
 
 /// 可克隆的取消信号。克隆出来的所有副本共享同一个标志。
-#[derive(Clone, Default, Debug)]
+#[derive(Clone)]
 pub struct CancelToken {
     flag: Arc<AtomicBool>,
+    /// 光有标志位不够：TCP 回退通道的读帧会**阻塞在网络上**，没人叫醒它
+    /// 就一直挂着。这个 watch 通道让 `cancelled()` 能立刻返回。
+    /// 用 watch 而不是 Notify：watch 会记住"已经取消"这件事，
+    /// 不存在"取消发生在注册等待之前"的竞态。
+    watch: Arc<tokio::sync::watch::Sender<bool>>,
+}
+
+impl Default for CancelToken {
+    fn default() -> Self {
+        let (tx, _rx) = tokio::sync::watch::channel(false);
+        Self {
+            flag: Arc::new(AtomicBool::new(false)),
+            watch: Arc::new(tx),
+        }
+    }
+}
+
+impl std::fmt::Debug for CancelToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CancelToken")
+            .field("cancelled", &self.is_cancelled())
+            .finish()
+    }
 }
 
 impl CancelToken {
@@ -31,6 +54,23 @@ impl CancelToken {
     /// 请求取消。可以从任意线程调用（UI 的按钮线程、信号处理器都行）。
     pub fn cancel(&self) {
         self.flag.store(true, Ordering::SeqCst);
+        let _ = self.watch.send(true);
+    }
+
+    /// 等到被取消；已经取消则立刻返回。
+    ///
+    /// 给"读网络"这类会长期阻塞的地方用：只有标志位的话，读会一直挂着。
+    pub async fn cancelled(&self) {
+        if self.is_cancelled() {
+            return;
+        }
+        let mut rx = self.watch.subscribe();
+        // 先看当前值再等变化：`send` 发生在 `subscribe` 之前的窗口不会漏
+        while !*rx.borrow_and_update() {
+            if rx.changed().await.is_err() {
+                return;
+            }
+        }
     }
 
     pub fn is_cancelled(&self) -> bool {

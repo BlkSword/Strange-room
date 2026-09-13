@@ -67,6 +67,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── 阶段二：走回环传输 ──
     let session = HostSession::start(HostOptions {
+        tcp_port: None,
+
         plan,
         device_name: "bench-host".into(),
         listen_port: 0,
@@ -76,7 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     })
     .await?;
     let payload = chuanmen_core::QrPayload::new(
-        session.session_id.clone(),
+        session.session_id().to_string(),
         session.device_name().to_string(),
         session.fingerprint().to_string(),
         vec![chuanmen_core::AddressHint {
@@ -91,7 +93,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let progress = ProgressSender::new();
     let started = Instant::now();
     let summary = Receiver::run(
-        ReceiverOptions {
+        ReceiverOptions {force_tcp: false,
+
             payload,
             dest_dir: dst.clone(),
             device_name: "bench-recv".into(),

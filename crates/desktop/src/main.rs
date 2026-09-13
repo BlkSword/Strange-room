@@ -244,6 +244,8 @@ async fn start_share(
     let total_bytes = plan.total_bytes;
 
     let session = HostSession::start(HostOptions {
+        tcp_port: None,
+
         plan,
         device_name: device_name(),
         listen_port: 0,
@@ -270,6 +272,7 @@ async fn start_share(
         &payload.sid,
         &payload.fp,
         session.port(),
+        session.tcp_port(),
         &payload.addrs,
     ) {
         Ok(ad) => {
@@ -298,7 +301,7 @@ async fn start_share(
                         EVT,
                         UiEvent::Done {
                             files: s.files_sent,
-                            texts: s.texts.len(),
+                            texts: s.text_count(),
                             bytes: s.bytes_sent,
                             human_bytes: human_bytes(s.bytes_sent),
                             failures: s.failures.len(),
@@ -443,7 +446,8 @@ async fn start_receive(
     let app_done = app.clone();
     tauri::async_runtime::spawn(async move {
         let result = Receiver::run(
-            ReceiverOptions {
+            ReceiverOptions {force_tcp: false,
+
                 payload,
                 dest_dir,
                 device_name: device_name(),
@@ -458,7 +462,7 @@ async fn start_receive(
         let ui = match result {
             Ok(s) => UiEvent::Done {
                 files: s.files_sent,
-                texts: s.texts.len(),
+                texts: s.text_count(),
                 bytes: s.bytes_sent,
                 human_bytes: human_bytes(s.bytes_sent),
                 failures: s.failures.len(),

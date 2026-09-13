@@ -94,6 +94,11 @@ enum Command {
         /// 顺便放进房间的一段文本/链接
         #[arg(long)]
         text: Option<String>,
+
+        /// 强制走 TCP 回退（不确定就别加：连不上会自动回退，只是要多等几秒）。
+        /// 已知对方网络封了 UDP 时用它，省掉每次的握手超时等待
+        #[arg(long, default_value_t = false)]
+        tcp: bool,
     },
 
     /// 看看附近有谁在分享（排查发现不到设备时用它；5 秒内出结果）
@@ -148,7 +153,7 @@ async fn run(cli: Cli) -> Result<()> {
         // 引导页下载下来的客户端就是靠这条路径「双击即可用」：
         // 不带参数 = 发现附近正在分享的设备并接收，不需要记任何命令。
         println!("（没有参数：按「接收」处理。想看全部用法用 chuan --help）");
-        return receive(None, PathBuf::from("."), None, false, Vec::new(), None).await;
+        return receive(None, PathBuf::from("."), None, false, Vec::new(), None, false).await;
     };
     match command {
         Command::Send {
@@ -167,7 +172,8 @@ async fn run(cli: Cli) -> Result<()> {
             no_resume,
             send_paths,
             text,
-        } => receive(payload, to, name, no_resume, send_paths, text).await,
+            tcp,
+        } => receive(payload, to, name, no_resume, send_paths, text, tcp).await,
         Command::Discover { timeout } => discover(timeout).await,
         Command::Diagnose { payload } => diagnose(payload).await,
     }
@@ -210,6 +216,8 @@ async fn send(
     println!("准备分享：{summary}");
 
     let session = HostSession::start(HostOptions {
+        tcp_port: None,
+
         plan,
         device_name: name.clone(),
         listen_port: port,
@@ -234,6 +242,7 @@ async fn send(
         &payload.sid,
         &payload.fp,
         session.port(),
+        session.tcp_port(),
         &payload.addrs,
     ) {
         Ok(ad) => {
@@ -445,6 +454,7 @@ async fn receive(
     no_resume: bool,
     send_paths: Vec<PathBuf>,
     text: Option<String>,
+    tcp: bool,
 ) -> Result<()> {
     let name = name.unwrap_or_else(device_name);
 
@@ -510,6 +520,7 @@ async fn receive(
             continue_partial: !no_resume,
             outgoing,
             cancel,
+            force_tcp: tcp,
         },
         &progress,
     )

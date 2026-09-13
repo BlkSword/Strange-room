@@ -75,6 +75,11 @@ pub struct Diagnosis {
     pub local_address: Option<IpAddr>,
     pub host_addresses: Vec<String>,
     pub probes: Vec<ProbeReport>,
+    /// TCP 回退通道的探测：（地址，能不能连上）。
+    ///
+    /// QUIC 走 UDP，很多企业网络/访客 WiFi 会封掉它；这时 TCP 回退是唯一的活路。
+    /// 自检必须把这条也报出来，否则用户会以为"网络完全不通"。
+    pub tcp_probes: Vec<(String, bool)>,
     pub verdict: Verdict,
     /// 一句话结论
     pub summary: String,
@@ -93,6 +98,15 @@ impl Diagnosis {
         out.push_str("主机地址：\n");
         for p in &self.probes {
             out.push_str(&format!("  {}  →  {}\n", p.address, p.outcome.describe()));
+        }
+        if !self.tcp_probes.is_empty() {
+            out.push_str("\nTCP 回退通道（UDP 被封时的备选）：\n");
+            for (addr, ok) in &self.tcp_probes {
+                out.push_str(&format!(
+                    "  {addr}  →  {}\n",
+                    if *ok { "可以连接" } else { "无响应" }
+                ));
+            }
         }
         out.push_str(&format!("\n结论：{}\n", self.summary));
         if !self.advice.is_empty() {
@@ -247,6 +261,7 @@ fn classify(local: Option<IpAddr>, probes: &[ProbeReport]) -> Diagnosis {
         local_address: local,
         host_addresses,
         probes: probes.to_vec(),
+        tcp_probes: Vec::new(),
         verdict,
         summary,
         advice,
@@ -280,7 +295,28 @@ pub async fn diagnose(payload: &QrPayload) -> Result<Diagnosis> {
         });
     }
 
-    Ok(classify(local, &probes))
+    let mut report = classify(local, &probes);
+
+    // TCP 回退通道：连接串里带了端口才测。只做一次连接（不做 TLS 握手）——
+    // 端口能连上就说明"UDP 被封时还有一条路"。
+    if let Some(port) = payload.tcp_port {
+        for hint in &payload.addrs {
+            let label = format!("{}:{}", hint.host, port);
+            let ok = match tls::resolve_addr(&hint.host, port).await {
+                Ok(addr) => tokio::time::timeout(
+                    std::time::Duration::from_millis(1500),
+                    tokio::net::TcpStream::connect(addr),
+                )
+                .await
+                .map(|r| r.is_ok())
+                .unwrap_or(false),
+                Err(_) => false,
+            };
+            report.tcp_probes.push((label, ok));
+        }
+    }
+
+    Ok(report)
 }
 
 /// 对单个地址做一次握手探测。成功即证明"可达且是指定主机"。
