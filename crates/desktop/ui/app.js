@@ -151,6 +151,53 @@ $("start-receive").onclick = async () => {
   }
 };
 
+// ── 附近的设备：不用扫码的那条路 ────────────────────────
+// 说明两点：
+// 1. 设备名来自网络（可能是别人故意起的），必须当不可信内容处理——
+//    所以下面一律用 textContent 而不是 innerHTML。
+// 2. 点设备走的是和扫码完全相同的流程（把连接串塞进输入框再点接收），
+//    这样接收路径只有一条。
+async function scanNearby() {
+  const btn = $("scan-nearby");
+  const ul = $("nearby");
+  const hint = $("nearby-hint");
+  btn.disabled = true;
+  btn.textContent = "搜索中…";
+  ul.innerHTML = "";
+  hint.textContent = "正在搜索同一 WiFi 下正在分享的设备……";
+  try {
+    const devices = await invoke("discover_hosts", { timeoutSecs: 3 });
+    if (!devices.length) {
+      hint.textContent =
+        "没搜到设备。确认两台设备在同一个 WiFi、对方还在分享；" +
+        "也可以让对方把连接串发给你，粘到下面那一栏。";
+      return;
+    }
+    hint.textContent =
+      "点设备即可接收。验证码应当和对方屏幕上显示的一致；对不上就别连。";
+    devices.forEach((d) => {
+      const li = document.createElement("li");
+      const label = document.createElement("span");
+      label.textContent = `${d.name} · 验证码 ${d.code} · ${d.address}`;
+      const b = document.createElement("button");
+      b.textContent = "接收";
+      b.onclick = () => {
+        $("payload-input").value = d.payload;
+        $("start-receive").click();
+      };
+      li.appendChild(label);
+      li.appendChild(b);
+      ul.appendChild(li);
+    });
+  } catch (e) {
+    hint.textContent = String(e);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "搜索附近设备";
+  }
+}
+$("scan-nearby").onclick = scanNearby;
+
 // 诊断网络：连不上时先跑这个，而不是让用户自己猜
 $("diagnose").onclick = async () => {
   const payload = $("payload-input").value.trim();

@@ -263,6 +263,65 @@ async fn start_share(
     })
 }
 
+/// 界面里「附近的设备」的一项。
+///
+/// 返回连接串而不是拆开的字段是刻意的：界面点一下就把连接串交给 `start_receive`，
+/// 和扫码走**完全相同**的接收路径——少一套路径就少一半 bug。
+#[derive(Serialize, Clone)]
+struct NearbyDevice {
+    name: String,
+    /// 与主机屏幕一致的 6 位验证码
+    code: String,
+    /// 形如 `192.168.1.9:51234`，让人知道连的是哪个地址
+    address: String,
+    payload: String,
+}
+
+/// 搜索附近正在分享的设备（mDNS）。
+///
+/// 这是「零准备」那条路：对方只要在分享，这边不扫码、不粘贴就能连上。
+/// 搜不到是常态之一（AP 隔离、禁组播、防火墙），所以界面必须同时保留
+/// 粘贴连接串的入口——发现失败不该让用户卡在这一屏。
+#[tauri::command]
+async fn discover_hosts(
+    state: State<'_, AppState>,
+    timeout_secs: Option<u64>,
+) -> Result<Vec<NearbyDevice>, String> {
+    // 自己正在分享时，别把自己列进去。
+    // 注意锁不能跨 await（MutexGuard 不是 Send），所以先取出 sid 再释放。
+    let own_sid = state
+        .host
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|host| host.qr_payload().ok())
+        .map(|payload| payload.sid);
+
+    let timeout = std::time::Duration::from_secs(timeout_secs.unwrap_or(3).clamp(1, 10));
+    let cancel = sr_core::CancelToken::new();
+    let hosts = sr_core::discover(timeout, own_sid.as_deref(), &cancel)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(hosts
+        .into_iter()
+        .filter_map(|host| {
+            // 生成不出连接串的设备直接跳过：点进去也只会得到一个看不懂的错误
+            let payload = host.payload().encode().ok()?;
+            Some(NearbyDevice {
+                name: host.device_name.clone(),
+                code: host.code.clone(),
+                address: host
+                    .addrs
+                    .first()
+                    .map(|a| format!("{}:{}", a.host, a.port))
+                    .unwrap_or_else(|| "地址未知".to_string()),
+                payload,
+            })
+        })
+        .collect())
+}
+
 /// 开始接收：连上主机并下载全部文件。
 #[tauri::command]
 async fn start_receive(
@@ -406,6 +465,7 @@ fn main() {
             cancel_share,
             cancel_transfer,
             diagnose_payload,
+            discover_hosts,
             pick_paths,
             inspect_payload
         ])

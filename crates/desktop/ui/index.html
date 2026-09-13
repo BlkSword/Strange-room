@@ -38,6 +38,18 @@
       <button id="clear-paths" class="ghost">清空</button>
     </div>
 
+    <!-- 零准备那条路：对方在分享就能直接看到，不用扫码 -->
+    <div class="panel">
+      <div class="row" style="margin-top:0">
+        <strong class="grow">同一 WiFi 下的设备</strong>
+        <button id="scan-nearby">搜索附近设备</button>
+      </div>
+      <ul id="nearby" class="paths"></ul>
+      <div id="nearby-hint" class="note" style="margin-top:8px">
+        对方开始分享后，这里会出现他的设备，点一下就能接收。
+      </div>
+    </div>
+
     <div class="panel">
       <label class="field">收到别人分享时，把连接串粘贴到这里
         <input id="payload-input" type="text" placeholder="srx1:…" />
