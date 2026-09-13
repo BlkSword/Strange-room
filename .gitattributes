@@ -1,0 +1,13 @@
+# 仓库里的文本文件统一用 LF。
+#
+# 原因：Windows 上 git 默认 core.autocrlf=true，检出时写 CRLF、提交时转回 LF。
+# 结果就是同一个文件在不同机器/编辑器里换行符各不相同——真机验收时
+# 就撞上过"文件内容没改、整文件却显示改动"的假 diff，还让按行匹配的
+# 补丁工具找不到目标。显式钉死成 LF，工作区与仓库一致，谁都不会再改。
+* text=auto eol=lf
+
+# 二进制文件不要参与换行符转换
+*.ico binary
+*.png binary
+*.exe binary
+*.dll binary
