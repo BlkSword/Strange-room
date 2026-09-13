@@ -17,7 +17,11 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::error::{Error, Result};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+/// 线路协议版本。
+///
+/// v2：第三条流做"双向房间"（两个方向各一条流，并发投放）。
+/// 老版本只开一条流且用"顺序交换"绕行，与新版本**不能混用**，所以版本号必须涨。
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// 默认分块大小。1 MiB 是吞吐与内存占用的折中点。
 pub const DEFAULT_CHUNK_SIZE: u32 = 1024 * 1024;
@@ -134,6 +138,12 @@ pub struct ServerHello {
     pub device_name: String,
     /// 主机愿意接受的最大分块大小，接收端据此决定 offer 里的 chunk_size。
     pub max_chunk_size: u32,
+    /// 主机这次是否也收东西（即有没有指定接收目录）。
+    ///
+    /// 有了它，接收端带着东西来、而对方没开接收目录时，可以**立刻**说清楚，
+    /// 而不是先把东西推过去、被拒绝、再重试四轮——那是个用法错误，重试没意义。
+    #[serde(default)]
+    pub accepts_incoming: bool,
 }
 
 /// 主机端共享的清单条目（文件或文本）。

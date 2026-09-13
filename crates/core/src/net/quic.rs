@@ -334,6 +334,7 @@ async fn serve_connection(
         session_id: session_id.to_string(),
         device_name: device_name.to_string(),
         max_chunk_size: DEFAULT_CHUNK_SIZE,
+        accepts_incoming: incoming_dir.is_some(),
     };
     write_frame(&mut send, &Frame::json(KIND_HELLO, &server_hello)?).await?;
 
@@ -355,80 +356,92 @@ async fn serve_connection(
     };
     write_frame(&mut send, &Frame::json(KIND_MANIFEST, &manifest)?).await?;
 
-    // ---- 3. 先把我们放的东西发出去（对方逐个 OFFER 来取）----
     let mut summary = TransferSummary::default();
-    let last = serve_items(&conn, &mut send, &mut recv, plan, progress, &mut summary).await?;
 
-    // ---- 4. 对方也往房间里放东西（第二级：双向共享空间 v1）----
+    // ---- 3. 两条流：A 用来送（我方清单），B 用来取（对方清单）----
     //
-    // 顺序交换：对方先把我方的东西取完，再把它的清单发过来；这时我们切成
-    // "接收方"，把它放的东西收进 incoming_dir。两边都能放、都能取，而且是在
-    // 一次会话里完成的——只是顺序进行，不并发（并发投放留到后面）。
-    if let Some(frame) = last {
-        if frame.kind == KIND_MANIFEST {
+    // 与接收端对称：A 上对方取我们的东西，B 上我们取对方的东西。两条流**并发**跑，
+    // 所以"我还在发大文件"的时候，对方也能把它的东西塞过来——不用排队。
+    let mut sent = TransferSummary::default();
+    let mut fetched = TransferSummary::default();
+
+    let serve = serve_items(&conn, &mut send, &mut recv, plan, progress, &mut sent);
+    let fetch = async {
+        // 对端可能只开一条流（老版本，或这次没有东西要放）。版本号已经跟着涨了，
+        // 这里等一小会儿只是为了：没有第二条流时不要空等到 QUIC 空闲超时。
+        let accepted =
+            tokio::time::timeout(std::time::Duration::from_secs(3), conn.accept_bi()).await;
+        let (mut send_b, mut recv_b) = match accepted {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(e)) => {
+                return Err(Error::protocol(format!("第二条数据流建立失败: {e}")));
+            }
+            // 对方没开第二条流：这次只有单向，正常收尾
+            Err(_) => return Ok(()),
+        };
+
+        let frame = read_frame(&mut recv_b)
+            .await?
+            .ok_or_else(|| Error::protocol("对方在发送清单前就断开了"))?;
+        frame.expect_kind(KIND_MANIFEST, "对方清单")?;
+        let theirs: FileManifest = frame.decode_json()?;
+
+        if !theirs.files.is_empty() {
             let Some(dir) = incoming_dir else {
                 // 没指定接收目录时明确报错，而不是默默把对方的东西丢掉
                 let msg =
                     "对方想往这里放东西，但这次分享没有指定接收目录（启动时用 --to 指定）"
                         .to_string();
                 let _ = write_frame(
-                    &mut send,
+                    &mut send_b,
                     &Frame::json(KIND_ERROR, &ErrorMsg { message: msg.clone() })?,
                 )
                 .await;
                 return Err(Error::protocol(msg));
             };
-            let guest_manifest: FileManifest = frame.decode_json()?;
             // 主机这边没有协作式取消（取消走的是关连接），给一个不会被触发的
             let cancel = CancelToken::new();
             pull_items(
                 &conn,
-                &mut send,
-                &mut recv,
-                &guest_manifest.files,
+                &mut send_b,
+                &mut recv_b,
+                &theirs.files,
                 dir,
                 session_id,
                 true,
                 DEFAULT_CHUNK_SIZE,
                 progress,
                 &cancel,
-                &mut summary,
+                &mut fetched,
             )
             .await?;
 
-            // 收完先回一句"我取完了"：对方此刻正在它的发送循环里等 OFFER，
-            // 它不会自己知道我们已经取完（不然两边会一直互相等到空闲超时）。
-            // 这条 BYE 之后，对方会发它自己的收尾 BYE，我们再收下就散会。
-            let _ = write_frame(
-                &mut send,
-                &Frame::json(
-                    KIND_BYE,
-                    &Bye {
-                        reason: Some("room items taken".into()),
-                    },
-                )?,
-            )
-            .await;
-
-            // 等对方的 BYE：它把东西发完就会说再见。
-            // 中间可能夹着别的帧（对每个条目的确认），忽略即可。
-            loop {
-                match read_frame_watchdog(&conn, &mut recv).await {
-                    Ok(Some(f)) if f.kind == KIND_BYE => break,
-                    Ok(Some(_)) => continue,
-                    Ok(None) => break,
-                    Err(e) if is_peer_gone(&e) => break,
-                    Err(e) => return Err(e),
-                }
-            }
-
             // 收完把续传状态文件删掉：它只是"下次能少传一点"的辅助信息，
-            // 留在对方的目录里就是一道痕迹，和"不留痕"的承诺不符
-            // （接收端那条路径一直是这么做的，主机这次也收东西，就得一样）。
+            // 留在对方的目录里就是一道痕迹，和"不留痕"的承诺不符。
             let _ = std::fs::remove_file(dir.join(RESUME_FILE));
         }
-    }
 
+        // 告诉对方"这个方向我取完了"：它的发送循环靠这句话收尾
+        let _ = write_frame(
+            &mut send_b,
+            &Frame::json(
+                KIND_BYE,
+                &Bye {
+                    reason: Some("room items taken".into()),
+                },
+            )?,
+        )
+        .await;
+        let _ = send_b.finish();
+        Ok(())
+    };
+
+    // join 而不是 try_join：一个方向出错不该把另一个方向掐掉
+    let (serve_result, fetch_result) = tokio::join!(serve, fetch);
+    merge_summary(&mut summary, sent);
+    merge_summary(&mut summary, fetched);
+    serve_result?;
+    fetch_result?;
     let _ = write_frame(
         &mut send,
         &Frame::json(
@@ -458,6 +471,19 @@ async fn serve_connection(
     // 直接失效。所以：发完 BYE、关掉连接，立刻回去准备接下一个。
     conn.close(0u32.into(), b"done");
     Ok(summary)
+}
+
+/// 把一次会话里两个方向的战果合并起来。
+///
+/// 两边各记各的账是有原因的：并发跑两个方向时，同一个 `&mut TransferSummary`
+/// 会被借用两次（Rust 不允许），也说不清"这个数字是谁的"。
+fn merge_summary(into: &mut TransferSummary, other: TransferSummary) {
+    into.files_sent += other.files_sent;
+    into.bytes_sent += other.bytes_sent;
+    into.received_files += other.received_files;
+    into.received_bytes += other.received_bytes;
+    into.texts.extend(other.texts);
+    into.failures.extend(other.failures);
 }
 
 /// 把自己清单里的东西发出去：等对方逐个 OFFER，然后送数据。
@@ -903,6 +929,16 @@ async fn open_session(
         )));
     }
 
+    // 我带着东西来，对方却没开接收目录：这是用法错误，立刻说清楚。
+    // （不这样做的后果实测过：东西推到一半被拒，然后按"连接中断"重试四轮，
+    // 每轮都重复同一句用法错误，用户只看到一串莫名其妙的重试。）
+    if opts.outgoing.is_some() && !server_hello.accepts_incoming {
+        return Err(Error::OfferRejected {
+            name: "我方要放进房间的东西".to_string(),
+            reason: "对方这次只往外分享，没有开接收目录（他启动时要加 --to 目录）".to_string(),
+        });
+    }
+
     // ---- 2. 清单 ----
     let frame = read_frame(&mut recv)
         .await?
@@ -943,58 +979,100 @@ async fn transfer_files(
     } = start;
 
     let mut summary = TransferSummary::default();
-    pull_items(
-        conn,
-        &mut send,
-        &mut recv,
-        &manifest.files,
-        &opts.dest_dir,
-        &opts.payload.sid,
-        opts.continue_partial,
-        max_chunk_size,
-        progress,
-        &opts.cancel,
-        &mut summary,
-    )
-    .await?;
-
-    // ---- 我方也往房间里放东西（第二级：双向共享空间 v1）----
+    // ---- 两条流：A 用来取、B 用来放（第三级：并发投放）----
     //
-    // 顺序交换：先把对方的取完，再把自己的清单发过去，然后切成"发送方"。
-    // 这样一次会话里两边都能放、都能取；并发投放留到后面。
-    if let Some(outgoing) = opts.outgoing.as_ref() {
-        let entries: Vec<FileEntry> = outgoing
-            .files
-            .iter()
-            .map(|f| FileEntry {
-                file_id: f.file_id.clone(),
-                relative_path: f.relative_path.clone(),
-                size: f.size,
-                blake3: f.blake3.clone(),
-                kind: f.kind,
-            })
-            .collect();
-        let out_manifest = FileManifest {
-            files: entries,
-            total_bytes: outgoing.total_bytes,
-        };
-        write_frame(&mut send, &Frame::json(KIND_MANIFEST, &out_manifest)?).await?;
+    // 为什么要两条流：一条流上"谁先说话"必须写死，两边同时放东西就会互相干等
+    // （第二级是靠"顺序交换 + 我取完了的 BYE"绕过去的，代价是必须排队）。
+    // QUIC 的流很便宜，给它两条：A 上对方送、我们取；B 上我们送、对方取。
+    // 两个方向各跑各的，谁也不用等谁——这才是"房间"该有的样子。
+    //
+    // 兼容性：老版本只开一条流，所以**协议版本号要跟着涨**（两边必须同版本）。
+    let (mut send_b, mut recv_b) = conn
+        .open_bi()
+        .await
+        .map_err(|e| Error::protocol(format!("无法建立第二条数据流: {e}")))?;
 
-        // 等对方逐个 OFFER 来取；收到 BYE 就结束
-        let _ = serve_items(conn, &mut send, &mut recv, outgoing, progress, &mut summary).await?;
+    // 空清单也要发：对方据此知道"这个方向没有东西可搬"，而不是一直等
+    let outgoing_entries: Vec<FileEntry> = opts
+        .outgoing
+        .as_ref()
+        .map(|plan| {
+            plan.files
+                .iter()
+                .map(|f| FileEntry {
+                    file_id: f.file_id.clone(),
+                    relative_path: f.relative_path.clone(),
+                    size: f.size,
+                    blake3: f.blake3.clone(),
+                    kind: f.kind,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let out_manifest = FileManifest {
+        files: outgoing_entries,
+        total_bytes: opts.outgoing.as_ref().map(|p| p.total_bytes).unwrap_or(0),
+    };
+    write_frame(&mut send_b, &Frame::json(KIND_MANIFEST, &out_manifest)?).await?;
+
+    // 两个方向各记各的账，最后合并（同一个 summary 会被借用两次，Rust 也不允许）
+    let mut taken = TransferSummary::default();
+    let mut given = TransferSummary::default();
+    let empty_plan = TransferPlan::default();
+    let outgoing_plan = opts.outgoing.as_ref().unwrap_or(&empty_plan);
+
+    let take = async {
+        let r = pull_items(
+            conn,
+            &mut send,
+            &mut recv,
+            &manifest.files,
+            &opts.dest_dir,
+            &opts.payload.sid,
+            opts.continue_partial,
+            max_chunk_size,
+            progress,
+            &opts.cancel,
+            &mut taken,
+        )
+        .await;
+        // 取得差不多就告诉对方"我取完了"：对方的发送循环靠这句话收尾，
+        // 别等到另一个方向也结束——那样对方会白等（它还在等我们的 OFFER）。
+        let _ = write_frame(
+            &mut send,
+            &Frame::json(
+                KIND_BYE,
+                &Bye {
+                    reason: Some("receiver done".into()),
+                },
+            )?,
+        )
+        .await;
+        let _ = send.finish();
+        r
+    };
+    let give = serve_items(
+        conn,
+        &mut send_b,
+        &mut recv_b,
+        outgoing_plan,
+        progress,
+        &mut given,
+    );
+    // join 而不是 try_join：一个方向出错不该把另一个方向掐掉，
+    // "我这边收不到"和"我这边发不出"是两件事，让它们各自跑完再一起报。
+    let (taken_result, given_result) = tokio::join!(take, give);
+    merge_summary(&mut summary, taken);
+    merge_summary(&mut summary, given);
+
+    let _ = send_b.finish();
+
+    if let Err(e) = taken_result {
+        return Err(e);
     }
-
-    let _ = write_frame(
-        &mut send,
-        &Frame::json(
-            KIND_BYE,
-            &Bye {
-                reason: Some("receiver done".into()),
-            },
-        )?,
-    )
-    .await;
-    let _ = send.finish();
+    if let Err(e) = given_result {
+        return Err(e);
+    }
 
     // 全部成功时把续传状态文件删掉：它只是"下次能少传一点"的辅助信息，
     // 传完后留着既没有用，也和"不留痕"的定位不符（用户目录里平白多出一个
@@ -1026,6 +1104,8 @@ fn is_retryable_interruption(e: &Error) -> bool {
             | Error::FingerprintMismatch { .. }
             | Error::UnsafePath(_)
             | Error::InsufficientSpace { .. }
+            // 对端明确拒绝（比如"我没开接收目录"）：这是用法问题，重试不会变好
+            | Error::OfferRejected { .. }
     )
 }
 
@@ -1182,7 +1262,7 @@ async fn pull_items(
 
         // 已完成的文件直接跳过（这才是"断点续传"里省时间的部分：
         // 重连后不重传已经收好的文件）
-        let have = state.resume_offset(&entry.file_id, &part, entry.size);
+        let mut have = state.resume_offset(&entry.file_id, &part, entry.size);
         if have >= entry.size && entry.size > 0 {
             // 已经从上次会话收完了？重新校验一遍再确认，不能只看状态文件
             let part_hash_ok = match fs_util::hash_file(&part) {
@@ -1209,8 +1289,14 @@ async fn pull_items(
                 summary.received_bytes += entry.size;
                 continue;
             }
-            // 校验没过：删掉重来
+            // 校验没过：删掉重来，并且**把起点归零**。
+            //
+            // 忘了归零就会出现这样一串怪事：状态说"已完成"、磁盘上的 .part
+            // 其实已经被上次成功改名（或删掉）了，于是拿"完整长度"当续传起点去
+            // 要一个空文件，最后报一个用户完全看不懂的"BLAKE3 不一致"，而且每次
+            // 重试都重演一遍（实测能一直重试到次数耗尽）。
             let _ = std::fs::remove_file(&part);
+            have = 0;
         }
 
         // 本地准备必须在**发 OFFER 之前**做完，理由见 prepare_target 的注释：
