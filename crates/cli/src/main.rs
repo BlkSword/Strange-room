@@ -38,7 +38,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// 分享文件：生成二维码，等待对方扫码接收
+    /// 分享文件：屏幕出现二维码，同时向局域网广播（对方扫码、直接发现、或从引导页下载客户端都行）
     Send {
         /// 要分享的文件或目录（可以多个）
         #[arg(required = true, num_args = 1..)]
