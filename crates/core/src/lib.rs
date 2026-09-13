@@ -1,7 +1,7 @@
-//! `strange-room-core`：Strange Room 的内核。
+//! `coalesce-core`：Coalesce 的内核。
 //!
 //! 这一层**不依赖任何 UI**，因此可以被三种前端复用：
-//! - `sr-cli`（v1 的主验证工具，也是长期的测试资产）
+//! - `coalesce-cli`（v1 的主验证工具，也是长期的测试资产）
 //! - Tauri 桌面壳（M6 起）
 //! - 将来的移动端
 //!

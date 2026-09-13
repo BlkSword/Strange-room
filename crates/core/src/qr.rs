@@ -8,8 +8,8 @@
 //! | `fingerprint` | 敢连（怎么信任对方，等价于 Signal 安全码比对） |
 //! | `session_id` | 连的是这个会话而不是别的 |
 //!
-//! 编码成 `srx1:<base64url(JSON)>`。加前缀是为了将来能识别版本、
-//! 并把"这是一段 Strange Room 连接串"和普通文本区分开；用 base64url
+//! 编码成 `coa1:<base64url(JSON)>`。加前缀是为了将来能识别版本、
+//! 并把"这是一段 Coalesce 连接串"和普通文本区分开；用 base64url
 //! 是为了避免 `+ / =` 在二维码和终端里的转义麻烦。
 
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,7 @@ use crate::error::{Error, Result};
 pub const QR_VERSION: u32 = 1;
 
 /// 人类可读前缀，方便用户辨认、也方便 CLI/UI 直接判断输入类型。
-pub const QR_PREFIX: &str = "srx1:";
+pub const QR_PREFIX: &str = "coa1:";
 
 /// 一个候选地址。v1 不依赖 mDNS，所以地址是"主机自己认为可用的局域网地址"，
 /// 由主机枚举网卡得到；可能有多个（多网卡/虚拟网卡），全部带上让接收端挨个试。
@@ -169,7 +169,7 @@ mod tests {
     fn decode_rejects_garbage() {
         assert!(QrPayload::decode("hello world").is_err());
         assert!(QrPayload::decode("").is_err());
-        assert!(QrPayload::decode("srx1:!!!!").is_err());
+        assert!(QrPayload::decode("coa1:!!!!").is_err());
     }
 
     #[test]

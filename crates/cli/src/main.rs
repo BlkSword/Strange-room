@@ -1,12 +1,12 @@
-//! `sr` —— Strange Room 的命令行客户端。
+//! `coa` —— Coalesce 的命令行客户端。
 //!
 //! v1 故意先做 CLI 而不是图形界面：文件传输、断点续传、协议正确性
 //! 这些最难的部分必须能被**自动化测试**和**两台真实机器**反复验证，
 //! 而不是靠"打开界面点一下看看"。CLI 同时是长期的测试资产。
 //!
 //! ```text
-//! 主机（要分享文件的人）:  sr send ./photos --port 45001
-//! 接收端（要拿文件的人）:  sr receive srx1:xxxx --to ./downloads
+//! 主机（要分享文件的人）:  coa send ./photos --port 45001
+//! 接收端（要拿文件的人）:  coa receive coa1:xxxx --to ./downloads
 //! ```
 
 mod render;
@@ -18,16 +18,16 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use sr_core::net::quic::{HostOptions, HostSession, Receiver, ReceiverOptions};
-use sr_core::progress::ProgressSender;
+use coalesce_core::net::quic::{HostOptions, HostSession, Receiver, ReceiverOptions};
+use coalesce_core::progress::ProgressSender;
 
 use render::ProgressRenderer;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "sr",
+    name = "coa",
     version,
-    about = "Strange Room：让同一房间里的设备共享文件。本地直连，不留痕。",
+    about = "Coalesce：让同一房间里的设备共享文件。本地直连，不留痕。",
     long_about = None
 )]
 struct Cli {
@@ -64,7 +64,7 @@ enum Command {
 
     /// 接收文件：带上连接串就直接连，不带就先列出附近正在分享的设备让你挑
     Receive {
-        /// 二维码/连接串（srx1: 开头）。省略时自动搜索同一 WiFi 下正在分享的设备
+        /// 二维码/连接串（coa1: 开头）。省略时自动搜索同一 WiFi 下正在分享的设备
         payload: Option<String>,
 
         /// 保存到哪个目录
@@ -89,13 +89,13 @@ enum Command {
 
     /// 网络自检：连不上时用它判断问题出在哪（只发握手，不传输任何文件）
     Diagnose {
-        /// 二维码里的连接串（srx1: 开头），由主机提供
+        /// 二维码里的连接串（coa1: 开头），由主机提供
         payload: String,
     },
 }
 
 fn device_name() -> String {
-    std::env::var("SR_DEVICE_NAME")
+    std::env::var("COA_DEVICE_NAME")
         .ok()
         .or_else(|| std::env::var("COMPUTERNAME").ok())
         .or_else(|| std::env::var("HOSTNAME").ok())
@@ -131,7 +131,7 @@ async fn run(cli: Cli) -> Result<()> {
     let Some(command) = cli.command else {
         // 引导页下载下来的客户端就是靠这条路径「双击即可用」：
         // 不带参数 = 发现附近正在分享的设备并接收，不需要记任何命令。
-        println!("（没有参数：按「接收」处理。想看全部用法用 sr --help）");
+        println!("（没有参数：按「接收」处理。想看全部用法用 coa --help）");
         return receive(None, PathBuf::from("."), None, false).await;
     };
     match command {
@@ -163,10 +163,10 @@ async fn send(
     let name = name.unwrap_or_else(device_name);
 
     println!("正在扫描文件并计算校验和……（大文件需要一点时间，但只需算一次）");
-    let plan = sr_core::plan_paths(&paths).context("展开待发送文件失败")?;
-    sr_core::net::quic::validate_plan_paths(&plan)?;
+    let plan = coalesce_core::plan_paths(&paths).context("展开待发送文件失败")?;
+    coalesce_core::net::quic::validate_plan_paths(&plan)?;
 
-    let summary = sr_core::net::quic::summarize_plan(&plan);
+    let summary = coalesce_core::net::quic::summarize_plan(&plan);
     println!("准备分享：{summary}");
 
     let session = HostSession::start(HostOptions {
@@ -185,10 +185,10 @@ async fn send(
     render::print_banner(session.device_name(), &summary, session.port());
     render::print_qr(&encoded, no_qr);
 
-    // 广播到局域网：同一 WiFi 下的人运行 sr receive 就能直接看到这台设备，不用扫码。
+    // 广播到局域网：同一 WiFi 下的人运行 coa receive 就能直接看到这台设备，不用扫码。
     // 广播不出去不算致命（二维码/连接串照样能用），所以只提示、不中断。
     // 返回的守卫必须在整个分享期间活着：drop 就等于撤销广播。
-    let _advertisement = match sr_core::discovery::Advertisement::start(
+    let _advertisement = match coalesce_core::discovery::Advertisement::start(
         session.device_name(),
         &payload.sid,
         &payload.fp,
@@ -198,9 +198,9 @@ async fn send(
         Ok(ad) => {
             println!(
                 "
-已广播到局域网：对方运行 sr receive 就能看到「{}」（验证码 {}，两边应当一致）",
+已广播到局域网：对方运行 coa receive 就能看到「{}」（验证码 {}，两边应当一致）",
                 session.device_name(),
-                sr_core::discovery::verification_code(&payload.fp)
+                coalesce_core::discovery::verification_code(&payload.fp)
             );
             Some(ad)
         }
@@ -215,7 +215,7 @@ async fn send(
     // 本身——客户端自己分发自己，不需要额外的分发渠道，也不用联网下载。
     // 起不来不算致命（对方可能已经有客户端了），所以只提示。
     let _bootstrap = match std::env::current_exe().ok().and_then(|p| std::fs::read(p).ok()) {
-        Some(bytes) => match sr_core::BootstrapServer::start(encoded.clone(), name.clone(), bytes).await {
+        Some(bytes) => match coalesce_core::BootstrapServer::start(encoded.clone(), name.clone(), bytes).await {
             Ok(server) => {
                 println!("
 对方还没有客户端？让他在浏览器里打开：{}", server.url());
@@ -268,7 +268,7 @@ async fn send(
             println!(
                 "\n传输完成：成功 {} 个文件，共 {}",
                 s.files_sent,
-                sr_core::net::quic::human_bytes(s.bytes_sent)
+                coalesce_core::net::quic::human_bytes(s.bytes_sent)
             );
             if !s.failures.is_empty() {
                 println!("有 {} 个文件失败：", s.failures.len());
@@ -291,7 +291,7 @@ async fn send(
 async fn diagnose(payload: String) -> Result<()> {
     println!("正在自检……会对二维码里的每个地址发一次握手，不传输任何文件
 ");
-    let d = sr_core::diag::diagnose_str(&payload).await.context("自检失败")?;
+    let d = coalesce_core::diag::diagnose_str(&payload).await.context("自检失败")?;
     print!("{}", d.render());
     Ok(())
 }
@@ -304,8 +304,8 @@ async fn discover(timeout_secs: u64) -> Result<()> {
     let timeout = Duration::from_secs(timeout_secs.max(1));
     println!("正在搜索附近正在分享的设备（{} 秒）……", timeout.as_secs());
 
-    let cancel = sr_core::CancelToken::new();
-    let hosts = sr_core::discover(timeout, None, &cancel)
+    let cancel = coalesce_core::CancelToken::new();
+    let hosts = coalesce_core::discover(timeout, None, &cancel)
         .await
         .context("搜索附近设备失败")?;
 
@@ -315,7 +315,7 @@ async fn discover(timeout_secs: u64) -> Result<()> {
         println!("mDNS 需要同时满足三条：两台设备在同一网段、网络允许组播、防火墙放行 UDP 5353。");
         println!("访客 WiFi 的 AP 隔离、部分企业网络、以及开着 VPN 时都会破坏其中一条。");
         println!("本机若有别的程序占着 UDP 5353（抓包工具、某些 VPN 客户端）也会导致搜不到。");
-        println!("这些情况下请让对方把连接串发给你，用 `sr receive <连接串>` 接收。");
+        println!("这些情况下请让对方把连接串发给你，用 `coa receive <连接串>` 接收。");
         anyhow::bail!("没有发现任何设备");
     }
 
@@ -328,26 +328,26 @@ async fn discover(timeout_secs: u64) -> Result<()> {
     Ok(())
 }
 
-/// 扫描附近设备并让用户挑一台（用于 `sr receive` 不带连接串的情况）。
+/// 扫描附近设备并让用户挑一台（用于 `coa receive` 不带连接串的情况）。
 ///
 /// 交互约定刻意做成"能自动就自动"：只找到一台就直接用——那是最常见的场景，
-/// 没必要让人多按一次回车；找到多台才让人输序号。这样脚本里 `sr receive` 在
+/// 没必要让人多按一次回车；找到多台才让人输序号。这样脚本里 `coa receive` 在
 /// 只有一台设备时也能直接用，而多台时会明确报错，绝不"猜一个"然后传错机器。
-async fn pick_nearby_host() -> Result<sr_core::NearbyHost> {
-    let timeout = sr_core::discovery::DEFAULT_DISCOVERY_TIMEOUT;
+async fn pick_nearby_host() -> Result<coalesce_core::NearbyHost> {
+    let timeout = coalesce_core::discovery::DEFAULT_DISCOVERY_TIMEOUT;
     println!("正在搜索同一 WiFi 下正在分享的设备（{} 秒）……", timeout.as_secs());
 
-    let cancel = sr_core::CancelToken::new();
-    let hosts = sr_core::discover(timeout, None, &cancel)
+    let cancel = coalesce_core::CancelToken::new();
+    let hosts = coalesce_core::discover(timeout, None, &cancel)
         .await
         .context("搜索附近设备失败")?;
 
     if hosts.is_empty() {
         println!("没有找到正在分享的设备。可以检查：");
         println!("  · 两台设备是否连的是同一个网络（访客网络常开了 AP 隔离）");
-        println!("  · 对方是否还在分享状态（`sr send` 关掉就不再广播）");
+        println!("  · 对方是否还在分享状态（`coa send` 关掉就不再广播）");
         println!("  · 防火墙是否放行 UDP 5353（mDNS）；本机有没有别的程序占着这个端口");
-        println!("仍然不行时，让对方把连接串发给你，用 `sr receive <连接串>` 接收。");
+        println!("仍然不行时，让对方把连接串发给你，用 `coa receive <连接串>` 接收。");
         anyhow::bail!("没有找到正在分享的设备");
     }
 
@@ -388,13 +388,13 @@ async fn receive(
     let name = name.unwrap_or_else(device_name);
 
     // 没给连接串就走「发现」这条路：这是整个产品里最接近零准备的一步
-    // （对方只要运行 sr receive，不用扫码、不用手输任何东西）。
+    // （对方只要运行 coa receive，不用扫码、不用手输任何东西）。
     let payload = match payload {
         Some(p) => p,
         None => pick_nearby_host().await?.payload().encode()?,
     };
 
-    let payload = sr_core::QrPayload::decode(&payload)
+    let payload = coalesce_core::QrPayload::decode(&payload)
         .context("解析连接串失败")?;
 
     let dest = std::path::absolute(&to).unwrap_or(to);
@@ -407,7 +407,7 @@ async fn receive(
     // Ctrl+C 走"优雅停止"而不是直接被杀：已收的部分会保留，下次还能续传。
     // 直接杀进程会留下过期的检查点，下次要么整段重传，要么更糟——
     // 把不完整的数据当成完整的。
-    let cancel = sr_core::CancelToken::new();
+    let cancel = coalesce_core::CancelToken::new();
     {
         let c = cancel.clone();
         tokio::spawn(async move {
@@ -441,7 +441,7 @@ async fn receive(
             println!(
                 "\n接收完成：成功 {} 个文件，共 {}",
                 s.files_sent,
-                sr_core::net::quic::human_bytes(s.bytes_sent)
+                coalesce_core::net::quic::human_bytes(s.bytes_sent)
             );
             println!("文件已保存到：{}", dest.display());
             if !s.failures.is_empty() {

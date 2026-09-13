@@ -8,13 +8,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use sr_core::progress::{eta_seconds, percent, ProgressEvent};
+use coalesce_core::progress::{eta_seconds, percent, ProgressEvent};
 
 /// 打印启动横幅，把"怎么用"直接写在屏幕上，减少口头解释。
 pub fn print_banner(device_name: &str, summary: &str, port: u16) {
     println!();
     println!("┌─────────────────────────────────────────────┐");
-    println!("│  Strange Room · 正在等待接收                │");
+    println!("│  Coalesce · 正在等待接收                │");
     println!("└─────────────────────────────────────────────┘");
     println!("  设备：{device_name}");
     println!("  内容：{summary}");
@@ -26,7 +26,7 @@ pub fn print_banner(device_name: &str, summary: &str, port: u16) {
 pub fn print_qr(payload: &str, no_qr: bool) {
     if no_qr {
         println!("连接串（在接收端执行）：");
-        println!("  sr receive {payload}");
+        println!("  coa receive {payload}");
         return;
     }
     match qrcode::QrCode::new(payload.as_bytes()) {
@@ -41,12 +41,12 @@ pub fn print_qr(payload: &str, no_qr: bool) {
                 .build();
             println!("{rendered}");
             println!("  对方扫码，或在接收端执行：");
-            println!("  sr receive {payload}");
+            println!("  coa receive {payload}");
         }
         Err(e) => {
             // 二维码渲染失败不该阻断传输：连接串照样能用
             eprintln!("（二维码生成失败：{e}；请使用下方连接串）");
-            println!("  sr receive {payload}");
+            println!("  coa receive {payload}");
         }
     }
 }

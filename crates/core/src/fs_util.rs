@@ -253,7 +253,7 @@ mod tests {
     use super::*;
 
     fn tmpdir() -> PathBuf {
-        let d = std::env::temp_dir().join(format!("sr-test-{}", uuid::Uuid::new_v4()));
+        let d = std::env::temp_dir().join(format!("coa-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&d).unwrap();
         d
     }

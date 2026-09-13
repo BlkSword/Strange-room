@@ -1,11 +1,11 @@
 [package]
-name = "strange-room-core"
+name = "coalesce-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [lib]
-name = "sr_core"
+name = "coalesce_core"
 path = "src/lib.rs"
 
 [dependencies]

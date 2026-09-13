@@ -42,8 +42,8 @@ jobs:
       # 端到端用例会真的起 QUIC 端点互传文件、真的做断点续传，
       # 所以这一条命令同时验证了"能编译"和"能传"。
       - name: 测试内核与 CLI
-        run: cargo test -p strange-room-core -p sr-cli
+        run: cargo test -p coalesce-core -p coalesce-cli
 
       # 桌面端只在 Linux 与 Windows 上构建验证（macOS 也能过，但没必要占额度）
       - name: 构建桌面端
-        run: cargo build -p sr-desktop
+        run: cargo build -p coalesce-desktop

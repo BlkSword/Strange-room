@@ -4,7 +4,7 @@ members = ["crates/core", "crates/cli", "crates/desktop"]
 
 # 日常 `cargo build` / `cargo test`（不带 -p）只构建内核与 CLI。
 # 桌面端依赖 Tauri，编译产物有 2-3GB——不该让每次跑测试都把它拖上。
-# 需要界面时显式指定：cargo run -p sr-desktop
+# 需要界面时显式指定：cargo run -p coalesce-desktop
 default-members = ["crates/core", "crates/cli"]
 
 [workspace.package]

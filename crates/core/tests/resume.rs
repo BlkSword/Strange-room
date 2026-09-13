@@ -16,17 +16,17 @@ use std::path::PathBuf;
 
 mod common;
 
-use sr_core::net::quic::{HostOptions, HostSession, Receiver, ReceiverOptions};
-use sr_core::progress::ProgressSender;
-use sr_core::qr::QrPayload;
-use sr_core::transfer::resume::{PartialFile, ResumeState};
-use sr_core::plan_paths;
+use coalesce_core::net::quic::{HostOptions, HostSession, Receiver, ReceiverOptions};
+use coalesce_core::progress::ProgressSender;
+use coalesce_core::qr::QrPayload;
+use coalesce_core::transfer::resume::{PartialFile, ResumeState};
+use coalesce_core::plan_paths;
 
 fn tmp() -> (tempfile::TempDir, PathBuf) { common::tmp() }
 
 fn pseudo_random(len: usize, seed: u64) -> Vec<u8> { common::pseudo_random(len, seed) }
 
-async fn start_host(plan: sr_core::TransferPlan) -> HostSession {
+async fn start_host(plan: coalesce_core::TransferPlan) -> HostSession {
     HostSession::start(HostOptions {
         plan,
         device_name: "主机".to_string(),
@@ -43,7 +43,7 @@ fn payload_for(session: &HostSession) -> QrPayload {
         session.session_id.clone(),
         session.device_name().to_string(),
         session.fingerprint().to_string(),
-        vec![sr_core::AddressHint {
+        vec![coalesce_core::AddressHint {
             host: "127.0.0.1".to_string(),
             port: session.port(),
         }],
@@ -71,7 +71,7 @@ async fn resumes_from_the_offset_recorded_on_disk() {
     // ---- 布置"上次传了一半"的现场 ----
     let have = 1024 * 1024usize; // 已收 1 MiB
     let target = dst.join(&rel_path);
-    let part = sr_core::fs_util::part_path(&target);
+    let part = coalesce_core::fs_util::part_path(&target);
     std::fs::create_dir_all(part.parent().unwrap()).unwrap();
 
     // 先写正确的前缀，再把后面填成"不可能被源数据生成"的字节（0xAB）。
@@ -110,7 +110,7 @@ async fn resumes_from_the_offset_recorded_on_disk() {
     let observer = tokio::spawn(async move {
         let mut resumed_from = None;
         while let Ok(ev) = cli_events.recv().await {
-            if let sr_core::ProgressEvent::FileStarted { resumed_from: r, .. } = ev {
+            if let coalesce_core::ProgressEvent::FileStarted { resumed_from: r, .. } = ev {
                 resumed_from = Some(r);
             }
         }
@@ -125,7 +125,7 @@ async fn resumes_from_the_offset_recorded_on_disk() {
             dest_dir: dst.clone(),
             device_name: "接收端".into(),
             continue_partial: true,
-            cancel: sr_core::CancelToken::new(),
+            cancel: coalesce_core::CancelToken::new(),
         },
         &cli_progress,
     )
@@ -163,7 +163,7 @@ async fn resumes_from_the_offset_recorded_on_disk() {
     //    （它只是辅助信息，留着既没用，也不符合"不留痕"的定位）
     assert!(!part.exists(), ".part 文件应在成功后改名为正式文件");
     assert!(
-        !dst.join(sr_core::transfer::resume::RESUME_FILE).exists(),
+        !dst.join(coalesce_core::transfer::resume::RESUME_FILE).exists(),
         "全部文件成功后不应残留续传状态文件"
     );
     assert!(summary.failures.is_empty(), "{:?}", summary.failures);
@@ -194,7 +194,7 @@ async fn distrusts_a_checkpoint_that_does_not_match_the_disk() {
 
     // 布置现场：`.part` 长度足够（预分配过），但内容不是我们要的
     let target = dst.join(&rel_path);
-    let part = sr_core::fs_util::part_path(&target);
+    let part = coalesce_core::fs_util::part_path(&target);
     std::fs::create_dir_all(part.parent().unwrap()).unwrap();
     std::fs::write(&part, vec![0u8; total]).unwrap();
 
@@ -221,7 +221,7 @@ async fn distrusts_a_checkpoint_that_does_not_match_the_disk() {
             dest_dir: dst.clone(),
             device_name: "r".into(),
             continue_partial: true,
-            cancel: sr_core::CancelToken::new(),
+            cancel: coalesce_core::CancelToken::new(),
         },
         &ProgressSender::new(),
     )
@@ -269,7 +269,7 @@ async fn cancel_stops_promptly_and_keeps_progress_for_resume() {
     let host = tokio::spawn(async move { session.accept_once(&ProgressSender::new()).await });
 
     // 150ms 后取消（此时应已传了一部分，但远没传完）
-    let cancel = sr_core::CancelToken::new();
+    let cancel = coalesce_core::CancelToken::new();
     let cancel_later = cancel.clone();
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
@@ -291,7 +291,7 @@ async fn cancel_stops_promptly_and_keeps_progress_for_resume() {
     let elapsed = started.elapsed();
 
     assert!(
-        matches!(result, Err(sr_core::Error::Cancelled)),
+        matches!(result, Err(coalesce_core::Error::Cancelled)),
         "取消后应返回 Cancelled 错误，实际: {:?}",
         result.as_ref().err().map(|e| e.to_string())
     );
@@ -302,7 +302,7 @@ async fn cancel_stops_promptly_and_keeps_progress_for_resume() {
 
     // 关键断言：进度必须留下，而且状态里记录的是"可信的前缀"
     let target = dst.join(&rel_path);
-    let part = sr_core::fs_util::part_path(&target);
+    let part = coalesce_core::fs_util::part_path(&target);
     assert!(part.exists(), "取消后必须保留 .part，否则下次只能整段重传");
 
     let state = ResumeState::load(&dst);
@@ -341,7 +341,7 @@ async fn cancel_stops_promptly_and_keeps_progress_for_resume() {
             dest_dir: dst.clone(),
             device_name: "接收端".into(),
             continue_partial: true,
-            cancel: sr_core::CancelToken::new(),
+            cancel: coalesce_core::CancelToken::new(),
         },
         &ProgressSender::new(),
     )
@@ -406,7 +406,7 @@ async fn reconnects_and_resumes_after_a_real_interruption() {
             dest_dir: dst.clone(),
             device_name: "接收端".into(),
             continue_partial: true,
-            cancel: sr_core::CancelToken::new(),
+            cancel: coalesce_core::CancelToken::new(),
         },
         &ProgressSender::new(),
     )

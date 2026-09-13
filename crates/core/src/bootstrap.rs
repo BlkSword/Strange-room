@@ -1,6 +1,6 @@
 //! 引导页：让"对方还没有客户端"这件事不再卡住流程。
 //!
-//! 这是"零准备"最后一块拼图。在这之前，访客侧必须先有 `sr` 才能接收——而现实里
+//! 这是"零准备"最后一块拼图。在这之前，访客侧必须先有 `coa` 才能接收——而现实里
 //! 对方多半什么都没装。所以主机在分享时顺手开一个**只读**的小 HTTP 服务：
 //!
 //! - `GET /`          一页说明：怎么下载、怎么用（含可复制的连接串）
@@ -123,7 +123,7 @@ async fn serve(
     let response = match path {
         "/" | "/index.html" => Response::html(page.as_str()),
         "/payload" => Response::text(&payload),
-        "/download" | "/sr.exe" | "/sr" => Response::attachment(&client, "sr.exe"),
+        "/download" | "/coa.exe" | "/coa" => Response::attachment(&client, "coa.exe"),
         _ => Response::not_found(),
     };
     response.write_to(&mut stream).await

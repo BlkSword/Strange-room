@@ -15,7 +15,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use crate::error::{Error, Result};
 
 /// 自签证书里使用的占位名字。因为校验只认指纹，域名不参与判断。
-pub const SERVER_NAME: &str = "strange-room.local";
+pub const SERVER_NAME: &str = "coalesce.local";
 
 /// 证书指纹算法：BLAKE3 输出前 16 字节（128 位），hex 编码后 32 个字符。
 ///
@@ -58,7 +58,7 @@ pub fn fingerprint_of(cert_der: &[u8]) -> String {
 }
 
 const IDENTITY_FILE: &str = "identity.bin";
-const IDENTITY_MAGIC: &[u8; 8] = b"SRIDENT1";
+const IDENTITY_MAGIC: &[u8; 8] = b"COALESC1";
 
 /// 把身份编码成单一字节串。证书与私钥必须一起发布，否则会出现错配。
 fn encode_identity(id: &Identity) -> Vec<u8> {
@@ -150,16 +150,29 @@ impl Identity {
 
         // 只要正式文件存在，就一定能完整读到（发布是原子的）
         if path.exists() {
+            let mut last_err = None;
             for attempt in 0..50u32 {
                 match Self::load(&path) {
                     Ok(id) => return Ok(id),
-                    Err(_) if attempt < 49 => {
+                    Err(e) => {
+                        last_err = Some(e);
                         // 极少数情况下会遇到别人正在覆盖的瞬间，稍等再试
-                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        if attempt < 49 {
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
                     }
-                    Err(e) => return Err(e),
                 }
             }
+
+            // 文件在、但确实读不出来：可能是旧版本留下的（格式变过），也可能是真损坏了。
+            // 这里选择**重新生成**，而不是让用户对着"身份文件格式不正确"卡死。
+            // 代价只是指纹变了（旧二维码失效，重新扫码即可）；这不是安全问题——
+            // 指纹本来就是"这台设备"的身份，换一个天经地义。
+            log_warn(&format!(
+                "身份文件无法解析（{}），已重新生成设备身份，旧二维码需要重新扫码。",
+                last_err.map(|e| e.to_string()).unwrap_or_default()
+            ));
+            let _ = fs::remove_file(&path);
         }
 
         // 确认还没有身份：自己生成一份，写入临时文件后一次性 rename 发布
@@ -192,11 +205,11 @@ impl Identity {
 
     /// 用户数据目录，按平台约定。
     pub fn default_dir() -> PathBuf {
-        if let Ok(dir) = std::env::var("SR_DATA_DIR") {
+        if let Ok(dir) = std::env::var("COA_DATA_DIR") {
             return PathBuf::from(dir);
         }
         let base = dirs_fallback();
-        base.join("strange-room")
+        base.join("coalesce")
     }
 }
 
@@ -318,7 +331,7 @@ mod tests {
 
     #[test]
     fn load_or_create_persists_fingerprint() {
-        let dir = std::env::temp_dir().join(format!("sr-id-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("coa-id-{}", uuid::Uuid::new_v4()));
         let first = Identity::load_or_create(&dir).unwrap();
         let second = Identity::load_or_create(&dir).unwrap();
         assert_eq!(first.fingerprint, second.fingerprint);

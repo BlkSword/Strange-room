@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Strange Room",
+  "productName": "Coalesce",
   "version": "0.1.0",
-  "identifier": "com.blksword.strange-room",
+  "identifier": "com.blksword.coalesce",
   "build": {
     "frontendDist": "ui"
   },
@@ -10,7 +10,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "Strange Room",
+        "title": "Coalesce",
         "width": 560,
         "height": 720,
         "minWidth": 460,

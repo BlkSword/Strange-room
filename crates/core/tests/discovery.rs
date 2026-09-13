@@ -5,13 +5,13 @@
 //!
 //! ⚠️ 这条测试**依赖环境的多播是否可用**。装在虚拟交换不转发组播的环境里、或者
 //! 本机有别的程序占着 UDP 5353（抓包工具、某些 VPN 客户端）时会失败——那种失败
-//! 不是代码问题。判断方法：一台机器 `sr send 文件`，另一台 `sr discover`，
+//! 不是代码问题。判断方法：一台机器 `coa send 文件`，另一台 `coa discover`，
 //! 后者应当列出前者，并显示和前者屏幕一致的验证码。
 
 use std::time::Duration;
 
-use sr_core::qr::AddressHint;
-use sr_core::{verification_code, Advertisement, CancelToken};
+use coalesce_core::qr::AddressHint;
+use coalesce_core::{verification_code, Advertisement, CancelToken};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn advertises_and_discovers_over_mdns() {
@@ -19,7 +19,7 @@ async fn advertises_and_discovers_over_mdns() {
     let fp = "d9df290b3485672194535f40b457ca6d";
 
     // 必须有一块真实的局域网地址：只广播回环等于什么都没广播
-    let lan_ip = sr_core::net::quic::local_address_hints(51234)
+    let lan_ip = coalesce_core::net::quic::local_address_hints(51234)
         .into_iter()
         .map(|h| h.host)
         .find(|h| h != "127.0.0.1")
@@ -37,7 +37,7 @@ async fn advertises_and_discovers_over_mdns() {
     )
     .expect("注册广播失败");
 
-    let hosts = sr_core::discover(Duration::from_secs(5), None, &CancelToken::new())
+    let hosts = coalesce_core::discover(Duration::from_secs(5), None, &CancelToken::new())
         .await
         .expect("搜索附近设备失败");
 
