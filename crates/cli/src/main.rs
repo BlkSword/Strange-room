@@ -31,8 +31,9 @@ use render::ProgressRenderer;
     long_about = None
 )]
 struct Cli {
+    /// 不给子命令时按「接收」处理：这是下载了客户端之后最自然的动作
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -127,7 +128,13 @@ fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<()> {
-    match cli.command {
+    let Some(command) = cli.command else {
+        // 引导页下载下来的客户端就是靠这条路径「双击即可用」：
+        // 不带参数 = 发现附近正在分享的设备并接收，不需要记任何命令。
+        println!("（没有参数：按「接收」处理。想看全部用法用 sr --help）");
+        return receive(None, PathBuf::from("."), None, false).await;
+    };
+    match command {
         Command::Send {
             paths,
             port,
@@ -202,6 +209,26 @@ async fn send(
 （没能广播出去：{e}。不影响使用——让对方扫码或用连接串。）");
             None
         }
+    };
+
+    // 引导页：对方**还没有客户端**时的那条路。它服务的就是「当前这个可执行文件」
+    // 本身——客户端自己分发自己，不需要额外的分发渠道，也不用联网下载。
+    // 起不来不算致命（对方可能已经有客户端了），所以只提示。
+    let _bootstrap = match std::env::current_exe().ok().and_then(|p| std::fs::read(p).ok()) {
+        Some(bytes) => match sr_core::BootstrapServer::start(encoded.clone(), name.clone(), bytes).await {
+            Ok(server) => {
+                println!("
+对方还没有客户端？让他在浏览器里打开：{}", server.url());
+                println!("（页面里有下载按钮；下载后双击运行就是接收）");
+                Some(server)
+            }
+            Err(e) => {
+                println!("
+（引导页没能起来：{e}。不影响传输：让对方用连接串。）");
+                None
+            }
+        },
+        None => None,
     };
 
     println!("\n等待对方接收……（在此终端按 Ctrl+C 可停止）");

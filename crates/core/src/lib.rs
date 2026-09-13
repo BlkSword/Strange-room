@@ -14,6 +14,7 @@
 //! progress       ← 把"发生了什么"发出去，UI 自己渲染
 //! ```
 
+pub mod bootstrap;
 pub mod bytes;
 pub mod diag;
 pub mod discovery;
@@ -27,6 +28,7 @@ pub mod protocol;
 pub mod qr;
 pub mod transfer;
 
+pub use bootstrap::BootstrapServer;
 pub use cancel::CancelToken;
 pub use diag::{Diagnosis, ProbeOutcome, ProbeReport, Verdict};
 pub use discovery::{discover, verification_code, Advertisement, NearbyHost};
