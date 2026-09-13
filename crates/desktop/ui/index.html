@@ -38,6 +38,16 @@
       <button id="clear-paths" class="ghost">清空</button>
     </div>
 
+    <label class="field" style="margin-top:12px">顺便说一句（也可以只发文字，不发文件）
+      <textarea id="share-text" rows="2"
+                placeholder="粘贴链接或写一段话，随文件一起发过去"></textarea>
+    </label>
+    <div class="row">
+      <input id="incoming-input" class="grow" type="text"
+             placeholder="对方放进来的东西存到哪（留空 = 这次只往外发）" />
+      <button id="pick-incoming">选择目录…</button>
+    </div>
+
     <!-- 零准备那条路：对方在分享就能直接看到，不用扫码 -->
     <div class="panel">
       <div class="row" style="margin-top:0">
@@ -60,6 +70,13 @@
       <div class="row" style="margin-top:8px">
         <button id="pick-dest" class="grow">选择保存目录…</button>
       </div>
+      <label class="field" style="margin-top:10px">我也要往对方那里放东西（可选）
+        <textarea id="receive-text" rows="2" placeholder="写一段话 / 链接放进房间"></textarea>
+      </label>
+      <div class="row">
+        <button id="pick-send" class="grow">选择要放进去的文件…</button>
+      </div>
+      <ul id="send-paths" class="paths"></ul>
       <div class="row" style="margin-top:10px">
         <button id="start-receive" class="primary grow">接收文件</button>
         <button id="diagnose" title="连不上时点这里">诊断网络</button>
@@ -83,6 +100,7 @@
         <button id="copy-payload">复制连接串</button>
       </div>
       <div class="note" id="share-addrs" style="margin-top:10px;text-align:center"></div>
+      <div class="note" id="share-incoming" style="margin-top:6px;text-align:center"></div>
     </div>
     <div class="row">
       <button id="cancel-share" class="ghost grow">停止分享</button>

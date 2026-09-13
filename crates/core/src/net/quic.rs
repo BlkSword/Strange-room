@@ -1260,6 +1260,39 @@ async fn pull_items(
         let target = fs_util::join_checked(&dest_dir, &rel);
         let part = fs_util::part_path(&target);
 
+        // 目标文件**已经在最终位置**且内容对得上：这次什么都不用做。
+        //
+        // 常见场景是"同一个文件再发一次到同一个目录"，或者上次会话其实已经传完、
+        // 只是收尾时出了别的问题。不检查这一步的话，会白下载一整遍：
+        // 跳过逻辑只看 .part，而成功的文件早就改名成最终名字了。
+        //
+        // 代价是要把最终文件完整哈希一遍（1.4GB/s 量级），相比之下重传一遍要慢得多，
+        // 所以这个交换是划算的。哈希对不上就照常走下面的流程（重新收）。
+        if entry.kind == ItemKind::File {
+            let target_ok = fs_util::hash_file(&target)
+                .map(|h| hex::encode(h.as_bytes()).eq_ignore_ascii_case(&entry.blake3))
+                .unwrap_or(false);
+            if target_ok {
+                state.upsert(PartialFile {
+                    relative_path: entry.relative_path.clone(),
+                    file_id: entry.file_id.clone(),
+                    total_size: entry.size,
+                    partial: entry.size,
+                    partial_hash: None,
+                    completed: true,
+                });
+                progress.send(ProgressEvent::FileFinished {
+                    file_id: entry.file_id.clone(),
+                    relative_path: entry.relative_path.clone(),
+                });
+                summary.files_sent += 1;
+                summary.bytes_sent += entry.size;
+                summary.received_files += 1;
+                summary.received_bytes += entry.size;
+                continue;
+            }
+        }
+
         // 已完成的文件直接跳过（这才是"断点续传"里省时间的部分：
         // 重连后不重传已经收好的文件）
         let mut have = state.resume_offset(&entry.file_id, &part, entry.size);

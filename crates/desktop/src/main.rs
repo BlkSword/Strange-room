@@ -38,6 +38,8 @@ struct ShareInfo {
     total_bytes: u64,
     /// 本机被扫的地址，扫码失败时让用户能手输
     addresses: Vec<String>,
+    /// 这次也收东西时，落在哪个目录（None = 只往外发）
+    incoming: Option<String>,
 }
 
 /// 推给界面的进度事件。
@@ -195,14 +197,32 @@ async fn start_share(
     app: AppHandle,
     state: State<'_, AppState>,
     paths: Vec<String>,
+    text: Option<String>,
+    incoming_dir: Option<String>,
 ) -> Result<ShareInfo, String> {
-    if paths.is_empty() {
-        return Err("还没有选择要分享的文件。把文件拖进窗口，或直接粘贴路径。".into());
+    let text = text.filter(|t| !t.trim().is_empty());
+    let incoming = incoming_dir.filter(|d| !d.trim().is_empty());
+    if paths.is_empty() && text.is_none() {
+        return Err("还没有要分享的内容。把文件拖进窗口、粘贴路径，或者写一段文字/链接。".into());
     }
-    let path_bufs: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
 
-    // 扫描 + 算哈希可能要几秒（大文件），界面要给出等待提示
-    let plan = chuanmen_core::plan_paths(&path_bufs).map_err(|e| e.to_string())?;
+    // 清单：文件走路径展开，文本直接在内存里（和 CLI 的 --text 是同一条路）
+    let mut plan = if paths.is_empty() {
+        chuanmen_core::TransferPlan::default()
+    } else {
+        let path_bufs: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+        // 扫描 + 算哈希可能要几秒（大文件），界面要给出等待提示
+        chuanmen_core::plan_paths(&path_bufs).map_err(|e| e.to_string())?
+    };
+    if let Some(t) = text.as_deref() {
+        let label = if t.trim_start().starts_with("http") {
+            "一个链接"
+        } else {
+            "一段文本"
+        };
+        chuanmen_core::transfer::plan::append_text(&mut plan, label, t)
+            .map_err(|e| e.to_string())?;
+    }
     let summary = summarize_plan(&plan);
     let file_count = plan.files.len();
     let total_bytes = plan.total_bytes;
@@ -213,7 +233,8 @@ async fn start_share(
         listen_port: 0,
         session_id: None,
         once: false,
-        incoming_dir: None,
+        // 对方也能往这里放东西：落在用户选的目录里（没选就是只往外发）
+        incoming_dir: incoming.clone().map(PathBuf::from),
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -272,6 +293,7 @@ async fn start_share(
         file_count,
         total_bytes,
         addresses,
+        incoming,
     })
 }
 
@@ -341,9 +363,36 @@ async fn start_receive(
     state: State<'_, AppState>,
     payload: String,
     dest: String,
+    send_paths: Vec<String>,
+    text: Option<String>,
 ) -> Result<(), String> {
     let payload = chuanmen_core::QrPayload::decode(&payload).map_err(|e| e.to_string())?;
     let dest_dir = PathBuf::from(dest);
+
+    // 我也要往房间里放东西（可选）：和 CLI 的 --send / --text 一一对应。
+    // 注意：主机没开接收目录时会立刻被拒绝（内核会报"对方这次只往外分享"），
+    // 不是等传一半才失败。
+    let text = text.filter(|t| !t.trim().is_empty());
+    let outgoing = if send_paths.is_empty() && text.is_none() {
+        None
+    } else {
+        let mut plan = if send_paths.is_empty() {
+            chuanmen_core::TransferPlan::default()
+        } else {
+            let bufs: Vec<PathBuf> = send_paths.iter().map(PathBuf::from).collect();
+            chuanmen_core::plan_paths(&bufs).map_err(|e| e.to_string())?
+        };
+        if let Some(t) = text.as_deref() {
+            let label = if t.trim_start().starts_with("http") {
+                "一个链接"
+            } else {
+                "一段文本"
+            };
+            chuanmen_core::transfer::plan::append_text(&mut plan, label, t)
+                .map_err(|e| e.to_string())?;
+        }
+        Some(plan)
+    };
 
     let progress = ProgressSender::new();
     spawn_forwarder(app.clone(), progress.subscribe());
@@ -359,7 +408,7 @@ async fn start_receive(
                 dest_dir,
                 device_name: device_name(),
                 continue_partial: true,
-                outgoing: None,
+                outgoing,
                 cancel,
             },
             &progress,

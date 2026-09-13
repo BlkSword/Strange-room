@@ -26,6 +26,31 @@ const human = (n) => {
 
 // ── 首页：收集要分享的路径 ────────────────────────────────
 let paths = [];
+// 接收时"我也要放进去"的文件（对应 CLI 的 --send）
+let sendPaths = [];
+
+function renderSendPaths() {
+  const ul = $("send-paths");
+  if (!ul) return;
+  ul.innerHTML = "";
+  sendPaths.forEach((p, i) => {
+    const li = document.createElement("li");
+    const name = p.split(/[\/]/).filter(Boolean).pop() || p;
+    li.innerHTML = `<span title="${p}">${name}</span>`;
+    const x = document.createElement("button");
+    x.className = "x";
+    x.textContent = "移除";
+    x.onclick = () => { sendPaths.splice(i, 1); renderSendPaths(); };
+    li.appendChild(x);
+    ul.appendChild(li);
+  });
+}
+
+$("pick-send").onclick = async () => {
+  const list = await pickInto("files");
+  for (const p of list) if (!sendPaths.includes(p)) sendPaths.push(p);
+  renderSendPaths();
+};
 
 function renderPaths() {
   const ul = $("paths");
@@ -40,8 +65,13 @@ function renderPaths() {
     li.appendChild(x);
     ul.appendChild(li);
   });
-  $("start-share").disabled = paths.length === 0;
+  // 只发一段文字/链接也是合法的分享内容，所以按钮不能只看文件列表
+  $("start-share").disabled = paths.length === 0 && !$("share-text").value.trim();
 }
+
+$("share-text").addEventListener("input", () => {
+  $("start-share").disabled = paths.length === 0 && !$("share-text").value.trim();
+});
 
 function addPaths(list) {
   for (const p of list) {
@@ -78,6 +108,10 @@ $("pick-dest").onclick = async () => {
   const list = await pickInto("folder");
   if (list.length) $("dest-input").value = list[0];
 };
+$("pick-incoming").onclick = async () => {
+  const list = await pickInto("folder");
+  if (list.length) $("incoming-input").value = list[0];
+};
 
 // 拖拽：这个产品的核心动作是"把东西摊到桌上"，所以拖拽必须能用
 const wv = T.webview?.getCurrentWebview?.();
@@ -97,10 +131,18 @@ $("start-share").onclick = async () => {
   btn.disabled = true;
   btn.textContent = "正在扫描文件…";
   try {
-    const info = await invoke("start_share", { paths });
+    const info = await invoke("start_share", {
+      paths,
+      text: $("share-text").value.trim() || null,
+      incomingDir: $("incoming-input").value.trim() || null,
+    });
     $("qr").innerHTML = info.qr_svg;
     $("share-summary").textContent = `${info.summary}`;
     $("share-addrs").textContent = (info.addresses || []).join("　");
+    // 告诉用户"对方也能放东西，而且会落在这里"，省得他事后才发现
+    $("share-incoming").textContent = info.incoming
+      ? `对方放的东西会存到：${info.incoming}`
+      : "";
     $("copy-payload").dataset.payload = info.payload;
     show("screen-share");
   } catch (e) {
@@ -145,7 +187,12 @@ $("start-receive").onclick = async () => {
   }
   showTransfer();
   try {
-    await invoke("start_receive", { payload, dest });
+    await invoke("start_receive", {
+      payload,
+      dest,
+      sendPaths,
+      text: $("receive-text").value.trim() || null,
+    });
   } catch (e) {
     showResult("没能开始接收", String(e), "", "fail");
   }

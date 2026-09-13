@@ -66,6 +66,71 @@ fn spawn_host_task(session: HostSession) -> tokio::task::JoinHandle<chuanmen_cor
 
 // ==================== 测试 ====================
 
+/// 目标文件已经正确躺在最终位置时，**不该再下载一遍**。
+///
+/// 这条守的是一次真实的浪费：跳过逻辑原来只看 `.part`，而传输成功的文件早就改名成
+/// 最终名字了——于是"同一个文件再发一次到同一个目录"会把整个文件重下一遍。
+#[tokio::test(flavor = "multi_thread")]
+async fn skips_files_already_correctly_in_place() {
+    common::isolated_env();
+    let (_src_guard, src) = tmp();
+    let (_dst_guard, dst) = tmp();
+
+    let data = pseudo_random(400_000, 6161);
+    let file = src.join("repeat.bin");
+    write_file(&file, &data);
+
+    // 第一次：正常传一遍
+    let plan = plan_paths(&[file.clone()]).unwrap();
+    let session = start_host(plan).await;
+    let payload = local_payload(&session);
+    let host = spawn_host_task(session);
+    let first = Receiver::run(
+        ReceiverOptions {
+            payload: payload.clone(),
+            dest_dir: dst.clone(),
+            device_name: "r".into(),
+            continue_partial: true,
+            outgoing: None,
+            cancel: chuanmen_core::CancelToken::new(),
+        },
+        &ProgressSender::new(),
+    )
+    .await
+    .expect("第一次接收失败");
+    assert_eq!(first.received_files, 1);
+    host.await.unwrap().unwrap();
+    assert_eq!(std::fs::read(dst.join("repeat.bin")).unwrap(), data);
+
+    // 第二次：同一个文件、同一个目录
+    let plan = plan_paths(&[file]).unwrap();
+    let session = start_host(plan).await;
+    let payload = local_payload(&session);
+    let host = spawn_host_task(session);
+    let second = Receiver::run(
+        ReceiverOptions {
+            payload,
+            dest_dir: dst.clone(),
+            device_name: "r".into(),
+            continue_partial: true,
+            outgoing: None,
+            cancel: chuanmen_core::CancelToken::new(),
+        },
+        &ProgressSender::new(),
+    )
+    .await
+    .expect("第二次接收失败");
+
+    assert!(second.failures.is_empty(), "{:?}", second.failures);
+    // 关键断言：主机一个字节都没发（说明是真跳过，而不是又传了一遍）
+    let host_summary = host.await.unwrap().unwrap();
+    assert_eq!(
+        host_summary.files_sent, 0,
+        "文件已经在目标目录里并且校验通过，主机不该再发一遍"
+    );
+    assert_eq!(std::fs::read(dst.join("repeat.bin")).unwrap(), data);
+}
+
 /// 第二级：**双向共享空间**——双方都能往房间里放东西，也都能取。
 ///
 /// 手法：主机放「文件 A + 一段文本」，接收端放「文件 B + 一个链接」，
