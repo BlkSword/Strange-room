@@ -30,6 +30,14 @@ use super::tls;
 /// 单次握手超时。QUIC 在证书被拒时会静默重试，没有这个超时用户只会看到"卡住"。
 pub const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
+/// 一直连不上时，总共最多等多久。
+///
+/// 为什么是 30 秒：主机侧的 QUIC 空闲超时是 12 秒——接收端被强杀后，主机要等
+/// 这么久才能回到 `accept()`，所以预算必须明显大于 12 秒。但也不能太长：
+/// 真机验收实测，60 秒预算下"主机已经关了"要白等 68 秒才报错，用户只会以为
+/// 程序卡死。30 秒覆盖 12 秒窗口的 2.5 倍，最坏情况 30 多秒给出结论。
+const RECONNECT_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// QUIC 空闲超时。
 ///
 /// 为什么需要显式设置：接收端进程被强杀时**不会**发送连接关闭帧，主机侧只能
@@ -262,6 +270,8 @@ pub struct TransferSummary {
     /// 本次会话处理过的文件数（发出去的 + 从对方收到的）。
     /// 单向传输时它就是"成功传完的文件数"。
     pub files_sent: usize,
+    /// 其中**发出去的文本条目**数（文本不是文件，界面要分开说）。
+    pub texts_sent: usize,
     /// 其中**从对方那里收到**的文件数（第二级：双向共享空间）。
     /// 主机用它区分"我发出去的"和"对方放进来的"。
     pub received_files: usize,
@@ -455,12 +465,13 @@ async fn serve_connection(
     let _ = send.finish();
 
     // 文本条目单独计数：界面上"0 个文件"和"1 段文本"是两件事
-    let texts = summary.texts.len();
+    let texts = summary.texts.len() + summary.texts_sent;
 
     progress.send(ProgressEvent::SessionFinished {
         files: summary.files_sent,
         texts,
         bytes: summary.bytes_sent,
+        failures: summary.failures.len(),
     });
 
     // 收尾：明确关闭连接，并且**不等** `conn.closed()` 就返回。
@@ -479,6 +490,7 @@ async fn serve_connection(
 /// 会被借用两次（Rust 不允许），也说不清"这个数字是谁的"。
 fn merge_summary(into: &mut TransferSummary, other: TransferSummary) {
     into.files_sent += other.files_sent;
+    into.texts_sent += other.texts_sent;
     into.bytes_sent += other.bytes_sent;
     into.received_files += other.received_files;
     into.received_bytes += other.received_bytes;
@@ -500,6 +512,14 @@ async fn serve_items(
     progress: &ProgressSender,
     summary: &mut TransferSummary,
 ) -> Result<Option<Frame>> {
+    // 文本条目不占磁盘、也不是文件——结算时按"段"记账。
+    // 先把清单里的文本 id 收出来，避免每个 OFFER 都去线性扫一遍清单。
+    let text_ids: std::collections::HashSet<&str> = plan
+        .files
+        .iter()
+        .filter(|f| f.kind == ItemKind::Text)
+        .map(|f| f.file_id.as_str())
+        .collect();
     loop {
         // 收尾健壮性：接收端传完后可能直接关闭连接，此处的读会以
         // "连接丢失"结束。传输其实已经成功完成，不该当成错误——否则
@@ -517,7 +537,11 @@ async fn serve_items(
                 let offer: FileOffer = frame.decode_json()?;
                 match send_one_file(send, plan, &offer, progress).await {
                     Ok(bytes) => {
-                        summary.files_sent += 1;
+                        if text_ids.contains(offer.file_id.as_str()) {
+                            summary.texts_sent += 1;
+                        } else {
+                            summary.files_sent += 1;
+                        }
                         summary.bytes_sent += bytes;
                         let _ = write_frame(
                             send,
@@ -734,9 +758,16 @@ impl Receiver {
         // 会话正常收尾（哪怕有文件因为目标写不进去被跳过）也不会进到这个分支。
         const MAX_ATTEMPTS: u32 = 4;
         let mut attempt = 0u32;
+        // 上一次会话是怎么断的。最后连不回来时，用户最需要知道的是"它是被
+        // 什么弄断的"——只留最后那句笼统的"连接超时"，会把人引向网络排查，
+        // 而真实原因常常是对方已经把分享关了。
+        let mut last_break: Option<String> = None;
         loop {
             attempt += 1;
-            let (conn, _endpoint) = connect_to_host(&opts, progress).await?;
+            let (conn, _endpoint) = match connect_to_host(&opts, progress).await {
+                Ok(pair) => pair,
+                Err(e) => return Err(reconnect_failed(last_break.as_deref(), e)),
+            };
             let start = open_session(&conn, &opts, progress).await?;
 
             match transfer_files(&conn, start, &opts, progress).await {
@@ -748,6 +779,7 @@ impl Receiver {
                         "连接中断（{e}）。{} 秒后自动重连续传（第 {attempt}/{MAX_ATTEMPTS} 次尝试）",
                         wait.as_secs()
                     )));
+                    last_break = Some(e.to_string());
                     if !sleep_unless_cancelled(wait, &opts.cancel).await {
                         return Err(Error::Cancelled);
                     }
@@ -755,6 +787,29 @@ impl Receiver {
                 Err(e) => return Err(e),
             }
         }
+    }
+}
+
+/// 断线之后又连不上：把"上一次会话是怎么断的"和"最后一条连接错误"合成一句。
+///
+/// 只留后者的话，一次被对方关掉分享的中断会显示成普通的"连接超时"，
+/// 用户会去查自己的网络，而真正的原因被埋在细节里。
+fn reconnect_failed(last_break: Option<&str>, cause: Error) -> Error {
+    match last_break {
+        Some(why) => Error::protocol(format!(
+            "会话中断（{why}），之后 {} 秒没能重新连上：{}",
+            RECONNECT_BUDGET.as_secs(),
+            plain_message(&cause)
+        )),
+        None => cause,
+    }
+}
+
+/// 去掉 `协议错误：` 前缀。合成消息时再套一层前缀会很难读。
+fn plain_message(e: &Error) -> String {
+    match e {
+        Error::Protocol(m) => m.clone(),
+        other => other.to_string(),
     }
 }
 
@@ -774,7 +829,7 @@ async fn connect_to_host(
     // `accept()`。这中间有几秒钟"主机还没准备好再接一个"的窗口。
     // 续传的价值恰恰在"断线后还能接上"，所以这里必须耐心等，而不是
     // 失败一次就告诉用户"连不上"。
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let deadline = std::time::Instant::now() + RECONNECT_BUDGET;
     let mut round = 0u32;
     while conn.is_none() {
         opts.cancel.check()?;
@@ -1083,8 +1138,9 @@ async fn transfer_files(
 
     progress.send(ProgressEvent::SessionFinished {
         files: summary.files_sent,
-        texts: summary.texts.len(),
+        texts: summary.texts.len() + summary.texts_sent,
         bytes: summary.bytes_sent,
+        failures: summary.failures.len(),
     });
 
     // 主动关闭，不去等 conn.closed()：等它只会一直拖到 QUIC 空闲超时。
@@ -1899,6 +1955,33 @@ pub fn validate_plan_paths(plan: &TransferPlan) -> Result<()> {
         fs_util::safe_relative_path(&f.relative_path)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reconnect_failure_keeps_the_reason_the_session_broke() {
+        let cause = Error::protocol("连接 10.0.0.2:1234 超时（8 秒）");
+        let e = reconnect_failed(Some("对端提前断开连接（已接收 240/400 字节，可用同一会话续传）"), cause);
+        let msg = e.to_string();
+        assert!(msg.contains("对端提前断开连接"), "{msg}");
+        assert!(msg.contains("10.0.0.2:1234"), "{msg}");
+        assert!(msg.contains("30 秒"), "{msg}");
+        // 合成消息里只该有一个"协议错误："前缀，不该层层嵌套
+        assert_eq!(msg.matches("协议错误：").count(), 1, "{msg}");
+    }
+
+    #[test]
+    fn reconnect_failure_without_a_prior_break_is_returned_as_is() {
+        let cause = Error::protocol("连接 10.0.0.2:1234 超时（8 秒）");
+        let e = reconnect_failed(None, cause);
+        assert_eq!(
+            e.to_string(),
+            "协议错误：连接 10.0.0.2:1234 超时（8 秒）"
+        );
+    }
 }
 
 

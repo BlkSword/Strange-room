@@ -215,19 +215,17 @@ fn render_loop(mut rx: tokio::sync::broadcast::Receiver<ProgressEvent>, role: Ro
                     bar.finish_and_clear();
                 }
             }
-            ProgressEvent::SessionFinished { files, texts, bytes } => {
+            ProgressEvent::SessionFinished {
+                files,
+                texts,
+                bytes,
+                failures,
+            } => {
                 overall.set_position(bytes);
                 overall.finish_and_clear();
                 let secs = started.elapsed().as_secs_f64();
-                let rate = if secs > 0.0 { bytes as f64 / secs } else { 0.0 };
-                multi.suspend(|| {
-                    println!(
-                        "完成：共处理 {files} 项（含 {texts} 段文本），{}，用时 {:.1}s（平均 {}/s）",
-                        human(bytes),
-                        secs,
-                        human(rate as u64)
-                    )
-                });
+                let line = summary_line(files, texts, bytes, secs, failures);
+                multi.suspend(|| println!("{line}"));
             }
             ProgressEvent::TextReceived { label, text } => {
                 // 文本不进磁盘：内容直接打到终端，用分隔线框起来方便整段复制。
@@ -262,6 +260,25 @@ fn human(n: u64) -> String {
 }
 
 /// 纯函数，便于测试：把字节进度换算成百分比。
+/// 会话收尾那一行（`完成：共处理 …`）。
+///
+/// 抽成纯函数是为了能测：**未完成的项必须出现在这一行里**。否则一次被中途
+/// 打断的会话会显示成"0 项，0 B"，操作者看着像什么都没发生，实际却传了
+/// 一半——真机验收里就是这么被抓到的。
+#[cfg_attr(not(test), allow(dead_code))]
+fn summary_line(files: usize, texts: usize, bytes: u64, secs: f64, failures: usize) -> String {
+    let rate = if secs > 0.0 { bytes as f64 / secs } else { 0.0 };
+    let mut line = format!(
+        "完成：共处理 {files} 项（含 {texts} 段文本），{}，用时 {secs:.1}s（平均 {}/s）",
+        human(bytes),
+        human(rate as u64)
+    );
+    if failures > 0 {
+        line.push_str(&format!("；{failures} 项未完成"));
+    }
+    line
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn overall_percent(done: u64, total: u64) -> f64 {
     percent(done, total)
@@ -270,6 +287,20 @@ pub fn overall_percent(done: u64, total: u64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summary_line_reports_unfinished_items() {
+        let line = summary_line(0, 0, 0, 12.6, 1);
+        assert!(line.contains("12.6s"), "{line}");
+        assert!(line.contains("1 项未完成"), "{line}");
+    }
+
+    #[test]
+    fn summary_line_stays_quiet_when_nothing_failed() {
+        let line = summary_line(2, 1, 3 * 1024 * 1024, 2.0, 0);
+        assert!(line.contains("共处理 2 项（含 1 段文本）"), "{line}");
+        assert!(!line.contains("未完成"), "{line}");
+    }
 
     #[test]
     fn overall_progress_does_not_go_backwards_when_a_file_finishes() {

@@ -36,6 +36,10 @@ pub enum ProgressEvent {
         files: usize,
         texts: usize,
         bytes: u64,
+        /// 没传完的条目数（发送失败、或对端中途消失）。
+        /// 收尾摘要必须能说出"有几项没成"：只说成功项的话，
+        /// 一次被打断的会话会显示成"0 项，0 B"，看着像什么都没发生过。
+        failures: usize,
     },
     /// 非致命问题（单个文件失败但会话继续）
     /// 收到一段文本（平台化的第一级：房间里不只有文件）。
@@ -134,6 +138,7 @@ mod tests {
             files: 1,
             texts: 0,
             bytes: 10,
+            failures: 0,
         });
         let got = rx.recv().await.unwrap();
         assert_eq!(
@@ -141,7 +146,8 @@ mod tests {
             ProgressEvent::SessionFinished {
                 files: 1,
                 texts: 0,
-                bytes: 10
+                bytes: 10,
+                failures: 0
             }
         );
     }

@@ -654,3 +654,48 @@ async fn diagnostics_on_a_dead_address_is_not_optimistic() {
     let text = d.render();
     assert!(text.contains("结论"), "报告应包含结论段");
 }
+
+/// 文本不是文件：发送端的战果要按"段"记账。
+///
+/// 真机验收时发现桌面端把一段纯文本显示成"1 个文件"——根因是发送端把每个
+/// OFFER 都算成文件，文本从来没有被单独计过。接收端一直是分开记的，
+/// 于是同一件事在两边显示成不同的东西。
+#[tokio::test]
+async fn a_sent_text_is_counted_as_text_not_as_a_file() {
+    common::isolated_env();
+    let (_src_guard, src) = tmp();
+    let (_dst_guard, dst) = tmp();
+
+    let file = src.join("payload.bin");
+    write_file(&file, &pseudo_random(50_000, 4242));
+    let mut plan = plan_paths(&[file]).unwrap();
+    chuanmen_core::transfer::plan::append_text(&mut plan, "一段文本", "只发文字").unwrap();
+
+    let session = start_host(plan).await;
+    let payload = local_payload(&session);
+    let host = spawn_host_task(session);
+
+    let summary = Receiver::run(
+        ReceiverOptions {
+            payload,
+            dest_dir: dst.clone(),
+            device_name: "r".into(),
+            continue_partial: true,
+            outgoing: None,
+            cancel: chuanmen_core::CancelToken::new(),
+        },
+        &ProgressSender::new(),
+    )
+    .await
+    .expect("接收失败");
+    assert_eq!(summary.received_files, 1);
+    assert_eq!(summary.texts.len(), 1, "接收端按段记账");
+
+    let host_summary = host.await.unwrap().expect("主机侧报错");
+    assert!(host_summary.failures.is_empty(), "{:?}", host_summary.failures);
+    assert_eq!(host_summary.files_sent, 1, "只发出去一个文件");
+    assert_eq!(
+        host_summary.texts_sent, 1,
+        "文本要单独记在 texts_sent 里，不能算成文件"
+    );
+}
