@@ -268,8 +268,17 @@ fn human(n: u64) -> String {
 #[cfg_attr(not(test), allow(dead_code))]
 fn summary_line(files: usize, texts: usize, bytes: u64, secs: f64, failures: usize) -> String {
     let rate = if secs > 0.0 { bytes as f64 / secs } else { 0.0 };
+    // 文件和文本分开说。原先的"共处理 N 项（含 M 段文本）"里 N 只数文件，
+    // 真机验收时"2 个文件 + 2 段文本"被读成"2 项含 2 段文本"——数字对不上，
+    // 用户会以为丢东西了。宁可啰嗦，也要让两边的账能对上。
+    let what = match (files, texts) {
+        (0, 0) => "0 项".to_string(),
+        (0, t) => format!("{t} 段文本"),
+        (f, 0) => format!("{f} 个文件"),
+        (f, t) => format!("{f} 个文件 + {t} 段文本"),
+    };
     let mut line = format!(
-        "完成：共处理 {files} 项（含 {texts} 段文本），{}，用时 {secs:.1}s（平均 {}/s）",
+        "完成：{what}，{}，用时 {secs:.1}s（平均 {}/s）",
         human(bytes),
         human(rate as u64)
     );
@@ -290,7 +299,8 @@ mod tests {
 
     #[test]
     fn summary_line_reports_unfinished_items() {
-        let line = summary_line(0, 0, 0, 12.6, 1);
+        let line = summary_line(0, 1, 0, 12.6, 1);
+        assert!(line.contains("1 段文本"), "{line}");
         assert!(line.contains("12.6s"), "{line}");
         assert!(line.contains("1 项未完成"), "{line}");
     }
@@ -298,7 +308,7 @@ mod tests {
     #[test]
     fn summary_line_stays_quiet_when_nothing_failed() {
         let line = summary_line(2, 1, 3 * 1024 * 1024, 2.0, 0);
-        assert!(line.contains("共处理 2 项（含 1 段文本）"), "{line}");
+        assert!(line.contains("2 个文件 + 1 段文本"), "{line}");
         assert!(!line.contains("未完成"), "{line}");
     }
 
