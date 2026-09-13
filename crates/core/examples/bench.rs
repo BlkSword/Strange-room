@@ -72,6 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         listen_port: 0,
         session_id: None,
         once: true,
+        incoming_dir: None,
     })
     .await?;
     let payload = chuanmen_core::QrPayload::new(
@@ -95,6 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             dest_dir: dst.clone(),
             device_name: "bench-recv".into(),
             continue_partial: true,
+            outgoing: None,
             cancel: chuanmen_core::CancelToken::new(),
         },
         &progress,

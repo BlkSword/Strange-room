@@ -213,6 +213,7 @@ async fn start_share(
         listen_port: 0,
         session_id: None,
         once: false,
+        incoming_dir: None,
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -358,6 +359,7 @@ async fn start_receive(
                 dest_dir,
                 device_name: device_name(),
                 continue_partial: true,
+                outgoing: None,
                 cancel,
             },
             &progress,

@@ -124,6 +124,10 @@ pub struct HostOptions {
     pub session_id: Option<String>,
     /// 只接受这一次连接就结束（v1 的 CLI 语义）。
     pub once: bool,
+    /// 对方往房间里放东西时，收进这个目录（None = 不接受对方放东西）。
+    ///
+    /// 这是第二级「双向共享空间」的开关：房间不该只是我单向往外掏东西。
+    pub incoming_dir: Option<PathBuf>,
 }
 
 pub struct HostSession {
@@ -133,6 +137,8 @@ pub struct HostSession {
     /// 全部哈希"这个决定带来的直接好处：传输期间不需要再回头读盘。
     plan: TransferPlan,
     device_name: String,
+    /// 对方放东西的落点（见 HostOptions::incoming_dir）
+    incoming_dir: Option<PathBuf>,
     pub session_id: String,
     pub port: u16,
 }
@@ -173,6 +179,7 @@ impl HostSession {
         Ok(Self {
             endpoint,
             identity,
+            incoming_dir: opts.incoming_dir.clone(),
             plan: opts.plan,
             device_name: opts.device_name,
             session_id,
@@ -232,6 +239,7 @@ impl HostSession {
                         &self.session_id,
                         &self.plan,
                         &self.device_name,
+                        self.incoming_dir.as_deref(),
                         progress,
                     )
                     .await;
@@ -251,8 +259,13 @@ impl HostSession {
 
 #[derive(Debug, Default, Clone)]
 pub struct TransferSummary {
-    /// 成功传完的文件数
+    /// 本次会话处理过的文件数（发出去的 + 从对方收到的）。
+    /// 单向传输时它就是"成功传完的文件数"。
     pub files_sent: usize,
+    /// 其中**从对方那里收到**的文件数（第二级：双向共享空间）。
+    /// 主机用它区分"我发出去的"和"对方放进来的"。
+    pub received_files: usize,
+    pub received_bytes: u64,
     /// 收到/发出的文本条目：（来源说明，内容）。
     /// 只在接收端填充——文本的落点在界面，不在磁盘上。
     pub texts: Vec<(String, String)>,
@@ -285,6 +298,7 @@ async fn serve_connection(
     session_id: &str,
     plan: &TransferPlan,
     device_name: &str,
+    incoming_dir: Option<&Path>,
     progress: &ProgressSender,
 ) -> Result<TransferSummary> {
     let (mut send, mut recv) = conn
@@ -341,28 +355,146 @@ async fn serve_connection(
     };
     write_frame(&mut send, &Frame::json(KIND_MANIFEST, &manifest)?).await?;
 
-    // ---- 3. 逐个文件：接收端主导 ----
+    // ---- 3. 先把我们放的东西发出去（对方逐个 OFFER 来取）----
     let mut summary = TransferSummary::default();
+    let last = serve_items(&conn, &mut send, &mut recv, plan, progress, &mut summary).await?;
+
+    // ---- 4. 对方也往房间里放东西（第二级：双向共享空间 v1）----
+    //
+    // 顺序交换：对方先把我方的东西取完，再把它的清单发过来；这时我们切成
+    // "接收方"，把它放的东西收进 incoming_dir。两边都能放、都能取，而且是在
+    // 一次会话里完成的——只是顺序进行，不并发（并发投放留到后面）。
+    if let Some(frame) = last {
+        if frame.kind == KIND_MANIFEST {
+            let Some(dir) = incoming_dir else {
+                // 没指定接收目录时明确报错，而不是默默把对方的东西丢掉
+                let msg =
+                    "对方想往这里放东西，但这次分享没有指定接收目录（启动时用 --to 指定）"
+                        .to_string();
+                let _ = write_frame(
+                    &mut send,
+                    &Frame::json(KIND_ERROR, &ErrorMsg { message: msg.clone() })?,
+                )
+                .await;
+                return Err(Error::protocol(msg));
+            };
+            let guest_manifest: FileManifest = frame.decode_json()?;
+            // 主机这边没有协作式取消（取消走的是关连接），给一个不会被触发的
+            let cancel = CancelToken::new();
+            pull_items(
+                &conn,
+                &mut send,
+                &mut recv,
+                &guest_manifest.files,
+                dir,
+                session_id,
+                true,
+                DEFAULT_CHUNK_SIZE,
+                progress,
+                &cancel,
+                &mut summary,
+            )
+            .await?;
+
+            // 收完先回一句"我取完了"：对方此刻正在它的发送循环里等 OFFER，
+            // 它不会自己知道我们已经取完（不然两边会一直互相等到空闲超时）。
+            // 这条 BYE 之后，对方会发它自己的收尾 BYE，我们再收下就散会。
+            let _ = write_frame(
+                &mut send,
+                &Frame::json(
+                    KIND_BYE,
+                    &Bye {
+                        reason: Some("room items taken".into()),
+                    },
+                )?,
+            )
+            .await;
+
+            // 等对方的 BYE：它把东西发完就会说再见。
+            // 中间可能夹着别的帧（对每个条目的确认），忽略即可。
+            loop {
+                match read_frame_watchdog(&conn, &mut recv).await {
+                    Ok(Some(f)) if f.kind == KIND_BYE => break,
+                    Ok(Some(_)) => continue,
+                    Ok(None) => break,
+                    Err(e) if is_peer_gone(&e) => break,
+                    Err(e) => return Err(e),
+                }
+            }
+
+            // 收完把续传状态文件删掉：它只是"下次能少传一点"的辅助信息，
+            // 留在对方的目录里就是一道痕迹，和"不留痕"的承诺不符
+            // （接收端那条路径一直是这么做的，主机这次也收东西，就得一样）。
+            let _ = std::fs::remove_file(dir.join(RESUME_FILE));
+        }
+    }
+
+    let _ = write_frame(
+        &mut send,
+        &Frame::json(
+            KIND_BYE,
+            &Bye {
+                reason: Some("transfer complete".into()),
+            },
+        )?,
+    )
+    .await;
+    let _ = send.finish();
+
+    // 文本条目单独计数：界面上"0 个文件"和"1 段文本"是两件事
+    let texts = summary.texts.len();
+
+    progress.send(ProgressEvent::SessionFinished {
+        files: summary.files_sent,
+        texts,
+        bytes: summary.bytes_sent,
+    });
+
+    // 收尾：明确关闭连接，并且**不等** `conn.closed()` 就返回。
+    //
+    // 这里的"等"是要害：连接不会自己立刻结束，`conn.closed()` 往往要等到
+    // QUIC 空闲超时（数十秒）才返回。如果主机在这里等，它就一直回不到
+    // `accept()`，接收端断线后重连时根本没人接——续传功能在真实使用中
+    // 直接失效。所以：发完 BYE、关掉连接，立刻回去准备接下一个。
+    conn.close(0u32.into(), b"done");
+    Ok(summary)
+}
+
+/// 把自己清单里的东西发出去：等对方逐个 OFFER，然后送数据。
+///
+/// 返回 `(战果, 需要调用方处理的帧)`。把最后一帧交回去是有意的：
+/// - 收到 BYE：会话该结束了；
+/// - 收到 MANIFEST：对方也要往房间里放东西（第二级：双向共享空间）。
+/// 这两个决定由调用方做——主机和接收端各有自己的下一步。
+async fn serve_items(
+    conn: &quinn::Connection,
+    send: &mut quinn::SendStream,
+    recv: &mut quinn::RecvStream,
+    plan: &TransferPlan,
+    progress: &ProgressSender,
+    summary: &mut TransferSummary,
+) -> Result<Option<Frame>> {
     loop {
         // 收尾健壮性：接收端传完后可能直接关闭连接，此处的读会以
         // "连接丢失"结束。传输其实已经成功完成，不该当成错误——否则
         // 用户会遇到"文件明明收好了却报失败"。
-        let frame = match read_frame_watchdog(&conn, &mut recv).await {
+        let frame = match read_frame_watchdog(conn, recv).await {
             Ok(Some(f)) => f,
-            Ok(None) => break, // 对端正常关闭发送方向
-            Err(e) if is_peer_gone(&e) => break,
+            Ok(None) => return Ok(None), // 对端正常关闭发送方向
+            Err(e) if is_peer_gone(&e) => return Ok(None),
             Err(e) => return Err(e),
         };
         match frame.kind {
-            KIND_BYE => break,
+            // 需要调用方决定的两帧：BYE 该收尾、MANIFEST 说明对方也要放东西
+            KIND_BYE | KIND_MANIFEST => return Ok(Some(frame)),
             KIND_OFFER => {
                 let offer: FileOffer = frame.decode_json()?;
-                match send_one_file(&mut send, plan, &offer, progress).await {
+                match send_one_file(send, plan, &offer, progress).await {
                     Ok(bytes) => {
                         summary.files_sent += 1;
                         summary.bytes_sent += bytes;
                         let _ = write_frame(
-                            &mut send,
+                            send,
                             &Frame::json(
                                 KIND_RESULT,
                                 &TransferResult {
@@ -382,7 +514,7 @@ async fn serve_connection(
                         eprintln!("[主机] 发送 {} 失败：{msg}", offer.relative_path);
                         summary.failures.push((offer.relative_path.clone(), msg.clone()));
                         let _ = write_frame(
-                            &mut send,
+                            send,
                             &Frame::json(
                                 KIND_RESULT,
                                 &TransferResult {
@@ -418,35 +550,7 @@ async fn serve_connection(
         }
     }
 
-    let _ = write_frame(
-        &mut send,
-        &Frame::json(
-            KIND_BYE,
-            &Bye {
-                reason: Some("transfer complete".into()),
-            },
-        )?,
-    )
-    .await;
-    let _ = send.finish();
 
-    // 文本条目单独计数：界面上"0 个文件"和"1 段文本"是两件事
-    let texts = summary.texts.len();
-
-    progress.send(ProgressEvent::SessionFinished {
-        files: summary.files_sent,
-        texts,
-        bytes: summary.bytes_sent,
-    });
-
-    // 收尾：明确关闭连接，并且**不等** `conn.closed()` 就返回。
-    //
-    // 这里的"等"是要害：连接不会自己立刻结束，`conn.closed()` 往往要等到
-    // QUIC 空闲超时（数十秒）才返回。如果主机在这里等，它就一直回不到
-    // `accept()`，接收端断线后重连时根本没人接——续传功能在真实使用中
-    // 直接失效。所以：发完 BYE、关掉连接，立刻回去准备接下一个。
-    conn.close(0u32.into(), b"done");
-    Ok(summary)
 }
 
 /// 发送单个文件。`offer.have_bytes` 是接收端声明的续传起点。
@@ -579,6 +683,10 @@ pub struct ReceiverOptions {
     pub dest_dir: PathBuf,
     pub device_name: String,
     pub continue_partial: bool,
+    /// 我方也要放进房间里的东西（None = 只取不放）。
+    ///
+    /// 这是第二级「双向共享空间」的接收端开关：对方取我的东西，我也往对方那里放。
+    pub outgoing: Option<TransferPlan>,
     /// 取消信号。传 `CancelToken::new()` 表示不取消。
     pub cancel: CancelToken,
 }
@@ -850,6 +958,32 @@ async fn transfer_files(
     )
     .await?;
 
+    // ---- 我方也往房间里放东西（第二级：双向共享空间 v1）----
+    //
+    // 顺序交换：先把对方的取完，再把自己的清单发过去，然后切成"发送方"。
+    // 这样一次会话里两边都能放、都能取；并发投放留到后面。
+    if let Some(outgoing) = opts.outgoing.as_ref() {
+        let entries: Vec<FileEntry> = outgoing
+            .files
+            .iter()
+            .map(|f| FileEntry {
+                file_id: f.file_id.clone(),
+                relative_path: f.relative_path.clone(),
+                size: f.size,
+                blake3: f.blake3.clone(),
+                kind: f.kind,
+            })
+            .collect();
+        let out_manifest = FileManifest {
+            files: entries,
+            total_bytes: outgoing.total_bytes,
+        };
+        write_frame(&mut send, &Frame::json(KIND_MANIFEST, &out_manifest)?).await?;
+
+        // 等对方逐个 OFFER 来取；收到 BYE 就结束
+        let _ = serve_items(conn, &mut send, &mut recv, outgoing, progress, &mut summary).await?;
+    }
+
     let _ = write_frame(
         &mut send,
         &Frame::json(
@@ -967,7 +1101,7 @@ async fn pull_items(
     let mut state = if continue_partial {
     ResumeState::load(&dest_dir)
     } else {
-    ResumeState::new(session_id.clone())
+    ResumeState::new(session_id.to_string())
     };
     if state.session_id.is_empty() {
     state.session_id = session_id.to_string();
@@ -993,6 +1127,7 @@ async fn pull_items(
                 {
                     Ok(text) => {
                         summary.bytes_sent += entry.size;
+                        summary.received_bytes += entry.size;
                         progress.send(ProgressEvent::TextReceived {
                             label: entry.relative_path.clone(),
                             text: text.clone(),
@@ -1070,6 +1205,8 @@ async fn pull_items(
                 });
                 summary.files_sent += 1;
                 summary.bytes_sent += entry.size;
+                summary.received_files += 1;
+                summary.received_bytes += entry.size;
                 continue;
             }
             // 校验没过：删掉重来
@@ -1163,6 +1300,8 @@ async fn pull_items(
 
         summary.files_sent += 1;
         summary.bytes_sent += received;
+        summary.received_files += 1;
+        summary.received_bytes += received;
 
         let _ = write_frame(
             send,
@@ -1642,5 +1781,6 @@ pub fn validate_plan_paths(plan: &TransferPlan) -> Result<()> {
     }
     Ok(())
 }
+
 
 

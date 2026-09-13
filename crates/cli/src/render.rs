@@ -222,7 +222,7 @@ fn render_loop(mut rx: tokio::sync::broadcast::Receiver<ProgressEvent>, role: Ro
                 let rate = if secs > 0.0 { bytes as f64 / secs } else { 0.0 };
                 multi.suspend(|| {
                     println!(
-                        "完成 {files} 个文件 + {texts} 段文本，{}，用时 {:.1}s（平均 {}/s）",
+                        "完成：共处理 {files} 项（含 {texts} 段文本），{}，用时 {:.1}s（平均 {}/s）",
                         human(bytes),
                         secs,
                         human(rate as u64)

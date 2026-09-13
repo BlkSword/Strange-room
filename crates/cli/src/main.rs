@@ -40,13 +40,17 @@ struct Cli {
 enum Command {
     /// 分享文件：屏幕出现二维码，同时向局域网广播（对方扫码、直接发现、或从引导页下载客户端都行）
     Send {
-    /// 要分享的文件或目录（可以多个）
-    #[arg(required_unless_present = "text", num_args = 0..)]
-    paths: Vec<PathBuf>,
+        /// 要分享的文件或目录（可以多个）
+        #[arg(required_unless_present = "text", num_args = 0..)]
+        paths: Vec<PathBuf>,
 
-    /// 发一段文本/链接（和路径可以一起用）
-    #[arg(long)]
-    text: Option<String>,
+        /// 发一段文本/链接（和路径可以一起用）
+        #[arg(long)]
+        text: Option<String>,
+
+        /// 对方放进来的东西存到哪。不给就表示这次只往外拿，不接受对方放东西
+        #[arg(long)]
+        to: Option<PathBuf>,
 
         /// 监听端口。默认随机分配一个空闲端口
         #[arg(long, default_value_t = 0)]
@@ -82,6 +86,14 @@ enum Command {
         /// 不续传：忽略已有进度，从头开始
         #[arg(long, default_value_t = false)]
         no_resume: bool,
+
+        /// 顺便放进房间的东西（文件或目录，可以多个）：对方也能拿到你的东西
+        #[arg(long = "send", num_args = 0..)]
+        send_paths: Vec<PathBuf>,
+
+        /// 顺便放进房间的一段文本/链接
+        #[arg(long)]
+        text: Option<String>,
     },
 
     /// 看看附近有谁在分享（排查发现不到设备时用它；5 秒内出结果）
@@ -136,7 +148,7 @@ async fn run(cli: Cli) -> Result<()> {
         // 引导页下载下来的客户端就是靠这条路径「双击即可用」：
         // 不带参数 = 发现附近正在分享的设备并接收，不需要记任何命令。
         println!("（没有参数：按「接收」处理。想看全部用法用 chuan --help）");
-        return receive(None, PathBuf::from("."), None, false).await;
+        return receive(None, PathBuf::from("."), None, false, Vec::new(), None).await;
     };
     match command {
         Command::Send {
@@ -146,13 +158,16 @@ async fn run(cli: Cli) -> Result<()> {
             once,
             no_qr,
             text,
-        } => send(paths, port, name, once, no_qr, text).await,
+            to,
+        } => send(paths, port, name, once, no_qr, text, to).await,
         Command::Receive {
             payload,
             to,
             name,
             no_resume,
-        } => receive(payload, to, name, no_resume).await,
+            send_paths,
+            text,
+        } => receive(payload, to, name, no_resume, send_paths, text).await,
         Command::Discover { timeout } => discover(timeout).await,
         Command::Diagnose { payload } => diagnose(payload).await,
     }
@@ -165,6 +180,7 @@ async fn send(
     once: bool,
     no_qr: bool,
     text: Option<String>,
+    incoming: Option<PathBuf>,
 ) -> Result<()> {
     let name = name.unwrap_or_else(device_name);
 
@@ -199,6 +215,7 @@ async fn send(
         listen_port: port,
         session_id: None,
         once,
+        incoming_dir: incoming.clone(),
     })
     .await
     .context("启动监听失败")?;
@@ -290,10 +307,22 @@ async fn send(
     match result {
         Ok(s) => {
             println!(
-                "\n传输完成：成功 {} 个文件，共 {}",
+                "
+房间关闭：本次共处理 {} 个文件，共 {}",
                 s.files_sent,
                 chuanmen_core::net::quic::human_bytes(s.bytes_sent)
             );
+            if s.received_files > 0 {
+                match &incoming {
+                    Some(dir) => println!(
+                        "其中对方放进来 {} 个文件，共 {}（已存到 {}）",
+                        s.received_files,
+                        chuanmen_core::net::quic::human_bytes(s.received_bytes),
+                        dir.display()
+                    ),
+                    None => println!("其中对方放进来 {} 个文件", s.received_files),
+                }
+            }
             if !s.failures.is_empty() {
                 println!("有 {} 个文件失败：", s.failures.len());
                 for (p, e) in &s.failures {
@@ -414,6 +443,8 @@ async fn receive(
     to: PathBuf,
     name: Option<String>,
     no_resume: bool,
+    send_paths: Vec<PathBuf>,
+    text: Option<String>,
 ) -> Result<()> {
     let name = name.unwrap_or_else(device_name);
 
@@ -430,6 +461,28 @@ async fn receive(
     let dest = std::path::absolute(&to).unwrap_or(to);
     println!("目标目录：{}", dest.display());
     println!("正在连接主机 {} ……", payload.name);
+
+    // 我也可以往房间里放东西：--send 的文件 + --text 的文本。
+    // 走的是和主机完全一样的清单结构，所以双向不需要动协议。
+    let outgoing = if send_paths.is_empty() && text.is_none() {
+        None
+    } else {
+        let mut plan = if send_paths.is_empty() {
+            chuanmen_core::TransferPlan::default()
+        } else {
+            println!("正在扫描要放进房间的东西……");
+            chuanmen_core::plan_paths(&send_paths).context("展开待放入的文件失败")?
+        };
+        if let Some(text) = &text {
+            let label = if looks_like_link(text) { "一个链接" } else { "一段文本" };
+            chuanmen_core::transfer::plan::append_text(&mut plan, label, text)?;
+        }
+        if plan.files.is_empty() {
+            anyhow::bail!("--send 和 --text 都是空的，没有东西可放进房间");
+        }
+        println!("我会往对方那里放：{}", chuanmen_core::net::quic::summarize_plan(&plan));
+        Some(plan)
+    };
 
     let progress = ProgressSender::new();
     let renderer = ProgressRenderer::spawn(progress.subscribe(), render::Role::Receive);
@@ -455,6 +508,7 @@ async fn receive(
             dest_dir: dest.clone(),
             device_name: name,
             continue_partial: !no_resume,
+            outgoing,
             cancel,
         },
         &progress,
@@ -468,23 +522,32 @@ async fn receive(
 
     match result {
         Ok(s) => {
-            // 摘要要分得清"文件"和"文本"：说"成功 0 个文件"再补一句"文件已保存到"
-            // 会让人以为收到了个空文件。文本的落点在终端，不在磁盘。
-            let human = chuanmen_core::net::quic::human_bytes(s.bytes_sent);
-            if s.files_sent == 0 && !s.texts.is_empty() {
-                println!("\n接收完成：{} 段文本，共 {human}", s.texts.len());
-                println!("文本已在上方显示（没有写入磁盘）。");
-            } else if s.texts.is_empty() {
-                println!("\n接收完成：成功 {} 个文件，共 {human}", s.files_sent);
-                println!("文件已保存到：{}", dest.display());
-            } else {
+            // 报数要分方向：双向房间里"我收到的"和"我放进房间的"是两回事。
+            // 收到 0 个文件也不能说"文件已保存到"——那是误导。
+            let put_items = s.files_sent.saturating_sub(s.received_files);
+            let sent_bytes = s.bytes_sent.saturating_sub(s.received_bytes);
+
+            if s.received_files > 0 || !s.texts.is_empty() {
                 println!(
-                    "\n接收完成：成功 {} 个文件 + {} 段文本，共 {human}",
-                    s.files_sent,
-                    s.texts.len()
+                    "\n接收完成：收到 {} 个文件 + {} 段文本，共 {}",
+                    s.received_files,
+                    s.texts.len(),
+                    chuanmen_core::net::quic::human_bytes(s.received_bytes)
                 );
-                println!("文件已保存到：{}", dest.display());
-                println!("文本已在上方显示（没有写入磁盘）。");
+                if s.received_files > 0 {
+                    println!("文件已保存到：{}", dest.display());
+                }
+                if !s.texts.is_empty() {
+                    println!("文本已在上方显示（没有写入磁盘）。");
+                }
+            } else {
+                println!("\n本次没有从对方那里取东西");
+            }
+            if put_items > 0 {
+                println!(
+                    "我放进房间：{put_items} 项，共 {}（对方取走了）",
+                    chuanmen_core::net::quic::human_bytes(sent_bytes)
+                );
             }
             if !s.failures.is_empty() {
                 println!("有 {} 个文件失败（其他文件不受影响）：", s.failures.len());

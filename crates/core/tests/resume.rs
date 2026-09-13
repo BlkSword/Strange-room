@@ -17,7 +17,7 @@ use std::path::PathBuf;
 mod common;
 
 use chuanmen_core::net::quic::{HostOptions, HostSession, Receiver, ReceiverOptions};
-use chuanmen_core::progress::ProgressSender;
+use chuanmen_core::progress::{ProgressEvent, ProgressSender};
 use chuanmen_core::qr::QrPayload;
 use chuanmen_core::transfer::resume::{PartialFile, ResumeState};
 use chuanmen_core::plan_paths;
@@ -33,6 +33,7 @@ async fn start_host(plan: chuanmen_core::TransferPlan) -> HostSession {
         listen_port: 0,
         session_id: None,
         once: true,
+        incoming_dir: None,
     })
     .await
     .expect("主机启动失败")
@@ -125,6 +126,7 @@ async fn resumes_from_the_offset_recorded_on_disk() {
             dest_dir: dst.clone(),
             device_name: "接收端".into(),
             continue_partial: true,
+            outgoing: None,
             cancel: chuanmen_core::CancelToken::new(),
         },
         &cli_progress,
@@ -221,6 +223,7 @@ async fn distrusts_a_checkpoint_that_does_not_match_the_disk() {
             dest_dir: dst.clone(),
             device_name: "r".into(),
             continue_partial: true,
+            outgoing: None,
             cancel: chuanmen_core::CancelToken::new(),
         },
         &ProgressSender::new(),
@@ -283,6 +286,7 @@ async fn cancel_stops_promptly_and_keeps_progress_for_resume() {
             dest_dir: dst.clone(),
             device_name: "接收端".into(),
             continue_partial: true,
+            outgoing: None,
             cancel,
         },
         &ProgressSender::new(),
@@ -341,6 +345,7 @@ async fn cancel_stops_promptly_and_keeps_progress_for_resume() {
             dest_dir: dst.clone(),
             device_name: "接收端".into(),
             continue_partial: true,
+            outgoing: None,
             cancel: chuanmen_core::CancelToken::new(),
         },
         &ProgressSender::new(),
@@ -384,19 +389,40 @@ async fn reconnects_and_resumes_after_a_real_interruption() {
     let session = std::sync::Arc::new(start_host(plan).await);
     let payload = payload_for(&session);
 
-    // 第一个会话：传一会儿就掐掉
-    let first = session.clone();
-    let host1 = tokio::spawn(async move { first.accept_once(&ProgressSender::new()).await });
+    // 第一个会话：等**接收端确实收到并落盘了**再掐断。
+    //
+    // 关键是看接收端的进度，而不是主机的发送进度：主机"已经写进 QUIC 流"
+    // 不代表接收端已经读到——连接一断，还在缓冲区里的数据就没了，检查点会是 0。
+    // 那样重连之后就是从 0 重传，测的就不再是续传。
+    // 阈值取 8MB：既保证落盘，又留出足够余额（文件总共 48MB）。
+    let progress = ProgressSender::new();
+    let mut watcher = progress.subscribe();
+    let first = tokio::spawn({
+        let session = session.clone();
+        async move { session.accept_once(&ProgressSender::new()).await }
+    });
     let killer = tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
-        host1.abort();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match tokio::time::timeout_at(deadline, watcher.recv()).await {
+                Ok(Ok(ProgressEvent::ChunkProgress { bytes_done, .. }))
+                    if bytes_done >= 8 * 1024 * 1024 =>
+                {
+                    break
+                }
+                Ok(Ok(_)) => continue,
+                _ => break,
+            }
+        }
+        first.abort();
     });
 
     // 主机继续服务（真实场景里主机一直挂着二维码等人连）
     let second = session.clone();
     let host2 = tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        second.accept_once(&ProgressSender::new()).await
+        let r = second.accept_once(&ProgressSender::new()).await;
+        r
     });
 
     let started = std::time::Instant::now();
@@ -406,9 +432,10 @@ async fn reconnects_and_resumes_after_a_real_interruption() {
             dest_dir: dst.clone(),
             device_name: "接收端".into(),
             continue_partial: true,
+            outgoing: None,
             cancel: chuanmen_core::CancelToken::new(),
         },
-        &ProgressSender::new(),
+        &progress,
     )
     .await
     .expect("断线之后应当自动重连续传，而不是直接失败");

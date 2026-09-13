@@ -33,6 +33,7 @@ async fn start_host(plan: TransferPlan) -> HostSession {
         listen_port: 0, // 随机端口，避免测试之间抢端口
         session_id: None,
         once: true,
+        incoming_dir: None,
     })
     .await
     .expect("主机启动失败");
@@ -65,6 +66,95 @@ fn spawn_host_task(session: HostSession) -> tokio::task::JoinHandle<chuanmen_cor
 
 // ==================== 测试 ====================
 
+/// 第二级：**双向共享空间**——双方都能往房间里放东西，也都能取。
+///
+/// 手法：主机放「文件 A + 一段文本」，接收端放「文件 B + 一个链接」，
+/// 一次会话结束后，两个目录各该拿到对方放的东西，两份文本各归其主。
+///
+/// 这条测试守的是"房间"这个定位：单向传输只是"我发你收"，双方都能放才是桌子。
+#[tokio::test(flavor = "multi_thread")]
+async fn both_sides_can_put_things_into_the_room() {
+    common::isolated_env();
+    let (_src_a, src_a) = tmp();
+    let (_src_b, src_b) = tmp();
+    let (_guest_guard, guest_dir) = tmp();
+    let (_host_guard, host_dir) = tmp();
+
+    // 主机放的东西：一个文件 + 一段文本
+    let file_a = src_a.join("host.bin");
+    let data_a = pseudo_random(120_000, 900);
+    write_file(&file_a, &data_a);
+    let mut host_plan = plan_paths(&[file_a]).unwrap();
+    chuanmen_core::transfer::plan::append_text(&mut host_plan, "一段文本", "主机放的文字").unwrap();
+
+    // 接收端放的东西：一个文件 + 一个链接
+    let file_b = src_b.join("guest.bin");
+    let data_b = pseudo_random(60_000, 901);
+    write_file(&file_b, &data_b);
+    let mut guest_plan = plan_paths(&[file_b]).unwrap();
+    chuanmen_core::transfer::plan::append_text(&mut guest_plan, "一个链接", "https://guest.example/x").unwrap();
+
+    // 主机这次指定了"对方放东西的落点"，所以它也会收到东西
+    let session = HostSession::start(HostOptions {
+        plan: host_plan,
+        device_name: "测试主机".to_string(),
+        listen_port: 0,
+        session_id: None,
+        once: true,
+        incoming_dir: Some(host_dir.clone()),
+    })
+    .await
+    .expect("主机启动失败");
+    let payload = local_payload(&session);
+    let host = spawn_host_task(session);
+
+    let summary = Receiver::run(
+        ReceiverOptions {
+            payload,
+            dest_dir: guest_dir.clone(),
+            device_name: "测试接收端".to_string(),
+            continue_partial: true,
+            outgoing: Some(guest_plan),
+            cancel: chuanmen_core::CancelToken::new(),
+        },
+        &ProgressSender::new(),
+    )
+    .await
+    .expect("接收失败");
+
+    // 接收端：拿到了主机放的文件和文本
+    assert!(summary.failures.is_empty(), "{:?}", summary.failures);
+    assert_eq!(summary.received_files, 1, "接收端该收到一个文件");
+    assert_eq!(
+        std::fs::read(guest_dir.join("host.bin")).unwrap(),
+        data_a,
+        "主机放的文件内容不对"
+    );
+    assert_eq!(summary.texts.len(), 1, "接收端该收到一段文本");
+    assert_eq!(summary.texts[0].1, "主机放的文字");
+    // 接收端自己也放了东西：既不是失败，也不该算成"收到"
+    assert!(summary.files_sent > summary.received_files, "接收端放进去的东西也该被处理");
+
+    // 主机：拿到了接收端放进来的文件和文本
+    let host_summary = host.await.unwrap().expect("主机侧报错");
+    assert!(host_summary.failures.is_empty(), "{:?}", host_summary.failures);
+    assert_eq!(host_summary.received_files, 1, "主机该收到对方放进来的文件");
+    assert_eq!(
+        std::fs::read(host_dir.join("guest.bin")).unwrap(),
+        data_b,
+        "对方放进来的文件内容不对"
+    );
+    assert_eq!(host_summary.texts.len(), 1, "主机该收到对方放的链接");
+    assert_eq!(host_summary.texts[0].1, "https://guest.example/x");
+
+    // 两个目录互不串门：各自只该有对方给自己的东西 + 自己的原文件不在里面
+    let guest_entries: Vec<String> = std::fs::read_dir(&guest_dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(guest_entries, vec!["host.bin".to_string()], "接收端目录里不该混进别的东西");
+}
+
 /// 文本条目：和文件走同一套传输，但**不落盘**。
 ///
 /// 这条守的是"房间里不只有文件"这件事：文本必须完整到达（内容经 BLAKE3 校验），
@@ -95,6 +185,7 @@ async fn transfers_a_text_item_alongside_a_file() {
             dest_dir: dst.clone(),
             device_name: "测试接收端".to_string(),
             continue_partial: true,
+            outgoing: None,
             cancel: chuanmen_core::CancelToken::new(),
         },
         &ProgressSender::new(),
@@ -148,6 +239,7 @@ async fn transfers_a_single_file_and_verifies_hash() {
             dest_dir: dst.clone(),
             device_name: "测试接收端".to_string(),
             continue_partial: true,
+            outgoing: None,
             cancel: chuanmen_core::CancelToken::new(),
         },
         &ProgressSender::new(),
@@ -204,6 +296,7 @@ async fn a_blocked_destination_skips_that_file_without_breaking_the_session() {
             dest_dir: dst.clone(),
             device_name: "r".into(),
             continue_partial: true,
+            outgoing: None,
             cancel: chuanmen_core::CancelToken::new(),
         },
         &ProgressSender::new(),
@@ -251,6 +344,7 @@ async fn transfers_a_folder_preserving_structure() {
             dest_dir: dst.clone(),
             device_name: "r".into(),
             continue_partial: true,
+            outgoing: None,
             cancel: chuanmen_core::CancelToken::new(),
         },
         &ProgressSender::new(),
@@ -298,6 +392,7 @@ async fn refuses_to_connect_when_fingerprint_does_not_match() {
                 dest_dir: dst.clone(),
                 device_name: "r".into(),
                 continue_partial: true,
+                outgoing: None,
                 cancel: chuanmen_core::CancelToken::new(),
             },
             &ProgressSender::new(),
@@ -361,6 +456,7 @@ async fn empty_files_are_handled() {
             dest_dir: dst.clone(),
             device_name: "r".into(),
             continue_partial: true,
+            outgoing: None,
             cancel: chuanmen_core::CancelToken::new(),
         },
         &ProgressSender::new(),
@@ -401,6 +497,7 @@ async fn rejects_a_stale_session_id() {
                 dest_dir: dst.clone(),
                 device_name: "r".into(),
                 continue_partial: true,
+                outgoing: None,
                 cancel: chuanmen_core::CancelToken::new(),
             },
             &ProgressSender::new(),
