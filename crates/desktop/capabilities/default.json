@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "主窗口的核心权限：事件通道（进度推送、完成/文本事件、拖放）、窗口与 Webview 基础能力。Tauri v2 里没有这份能力声明，前端所有 event.listen 都会被 ACL 拒绝——界面收不到任何后端事件，传输时看起来就像卡死。",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

@@ -139,6 +139,11 @@ $("start-share").onclick = async () => {
     $("qr").innerHTML = info.qr_svg;
     $("share-summary").textContent = `${info.summary}`;
     $("share-addrs").textContent = (info.addresses || []).join("　");
+    // 广播成功与否直接决定对方能不能"搜到"这台设备，必须写出来：
+    // 广播失败时用户还去点"搜索附近设备"只会白等
+    $("share-broadcast").textContent = info.advertised
+      ? "已广播到局域网：对方打开 Chuanmen 就能直接搜到这台设备"
+      : "没能广播（不影响使用）：让对方扫码，或把连接串发给他";
     // 告诉用户"对方也能放东西，而且会落在这里"，省得他事后才发现
     $("share-incoming").textContent = info.incoming
       ? `对方放的东西会存到：${info.incoming}`
@@ -381,19 +386,26 @@ if (listen) {
         }
         break;
       }
-      case "done":
+      case "done": {
         // 文本单独说：说"0 个文件"再配一句"传输完成"会让人以为出了什么问题
+        const failed = Number(e.failures || 0);
+        // 没传完的项必须说出来：只显示成功项的话，一次被中途打断的会话
+        // 看起来就像"什么都没发生过"，而用户其实少了一半东西
+        const hints = [];
+        if (e.files === 0 && e.texts > 0) hints.push("文本已显示在下方，可直接复制。");
+        if (failed > 0) hints.push(`${failed} 项没传完，可以连上同一个分享，从断点接着传。`);
         showResult(
-          "传输完成",
+          failed > 0 ? "部分完成" : "传输完成",
           e.files === 0 && e.texts > 0
             ? `${e.texts} 段文本，共 ${e.humanBytes}`
             : e.texts > 0
             ? `${e.files} 个文件 + ${e.texts} 段文本，共 ${e.humanBytes}`
             : `${e.files} 个文件，共 ${e.humanBytes}`,
-          e.files === 0 && e.texts > 0 ? "文本已显示在下方，可直接复制。" : "",
-          "ok"
+          hints.join(""),
+          failed > 0 ? "stop" : "ok"
         );
         break;
+      }
       case "failed": {
         // 用户主动停止不是失败，别用"没能完成"吓人，也别让他以为进度白丢了
         const cancelled = String(e.message || "").includes("已取消");

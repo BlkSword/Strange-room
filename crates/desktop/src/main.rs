@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
+use chuanmen_core::discovery::Advertisement;
 use chuanmen_core::net::quic::{
     human_bytes, summarize_plan, HostOptions, HostSession, Receiver, ReceiverOptions,
 };
@@ -40,6 +41,9 @@ struct ShareInfo {
     addresses: Vec<String>,
     /// 这次也收东西时，落在哪个目录（None = 只往外发）
     incoming: Option<String>,
+    /// 有没有广播到局域网。没有广播时对方搜不到这台设备，只能用二维码
+    /// 或连接串——界面要说清楚，不能让用户对着"搜索附近设备"干等。
+    advertised: bool,
 }
 
 /// 推给界面的进度事件。
@@ -47,7 +51,7 @@ struct ShareInfo {
 /// 字段刻意用界面视角命名（path/done/total），而不是直接透传内核结构——
 /// 这样以后内核调整字段，界面不用跟着改。
 #[derive(Serialize, Clone)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 enum UiEvent {
     PeerConnected {
         peer: String,
@@ -76,6 +80,9 @@ enum UiEvent {
         texts: usize,
         bytes: u64,
         human_bytes: String,
+        /// 没传完的条目数：界面要说出来，否则被打断的一次会话
+        /// 会显示成"0 个文件"，看着像什么都没发生
+        failures: usize,
     },
     /// 收到一段文本（平台化第一级）。它不是文件：界面把它当"贴纸"显示，
     /// 并提供一个复制按钮——用户的下一步动作几乎一定是"粘贴到别处"。
@@ -96,6 +103,9 @@ enum UiEvent {
 struct AppState {
     /// 当前分享会话。取消 = 关掉它，`accept()` 立刻返回，循环退出。
     host: Mutex<Option<Arc<HostSession>>>,
+    /// 当前分享的 mDNS 广播。Drop 就等于撤销广播，所以它必须和会话同生共死：
+    /// 只放在局部变量里的话，`start_share` 一返回广播就没了。
+    advertisement: Mutex<Option<Advertisement>>,
     /// 正在进行的接收。取消后已下载的部分会保留，下次可以续传。
     transfer: Mutex<Option<chuanmen_core::CancelToken>>,
 }
@@ -177,11 +187,17 @@ fn spawn_forwarder(app: AppHandle, mut rx: tokio::sync::broadcast::Receiver<Prog
                 ProgressEvent::FileFinished { relative_path, .. } => {
                     UiEvent::FileFinished { path: relative_path }
                 }
-                ProgressEvent::SessionFinished { files, texts, bytes } => UiEvent::Done {
+                ProgressEvent::SessionFinished {
+                    files,
+                    texts,
+                    bytes,
+                    failures,
+                } => UiEvent::Done {
                     files,
                     texts,
                     bytes,
                     human_bytes: human_bytes(bytes),
+                    failures,
                 },
                 ProgressEvent::TextReceived { label, text } => UiEvent::TextReceived { label, text },
                 ProgressEvent::Warn(message) => UiEvent::Warn { message },
@@ -244,6 +260,28 @@ async fn start_share(
     let svg = qr_svg(&encoded)?;
     let addresses = payload.addrs.iter().map(|a| a.display()).collect::<Vec<_>>();
 
+    // 广播到局域网：对方运行 `chuan receive`（或手机端）就能直接看到这台设备，
+    // 不用扫码。失败不影响用二维码，所以只记下来给界面提示、不让分享失败。
+    //
+    // 真机验收时这里缺过一次：CLI 分享会广播、桌面分享不广播，于是"搜索附近
+    // 设备"永远搜不到桌面端——同样的能力只在一端存在，是最容易漏的一类 bug。
+    let advertised = match Advertisement::start(
+        session.device_name(),
+        &payload.sid,
+        &payload.fp,
+        session.port(),
+        &payload.addrs,
+    ) {
+        Ok(ad) => {
+            *state.advertisement.lock().unwrap() = Some(ad);
+            true
+        }
+        Err(e) => {
+            eprintln!("[桌面] 局域网广播没起来：{e}");
+            false
+        }
+    };
+
     let session = Arc::new(session);
     *state.host.lock().unwrap() = Some(session.clone());
 
@@ -263,6 +301,7 @@ async fn start_share(
                             texts: s.texts.len(),
                             bytes: s.bytes_sent,
                             human_bytes: human_bytes(s.bytes_sent),
+                            failures: s.failures.len(),
                         },
                     );
                     if !s.failures.is_empty() {
@@ -294,6 +333,7 @@ async fn start_share(
         total_bytes,
         addresses,
         incoming,
+        advertised,
     })
 }
 
@@ -421,6 +461,7 @@ async fn start_receive(
                 texts: s.texts.len(),
                 bytes: s.bytes_sent,
                 human_bytes: human_bytes(s.bytes_sent),
+                failures: s.failures.len(),
             },
             Err(e) => UiEvent::Failed {
                 message: e.to_string(),
@@ -497,6 +538,8 @@ fn cancel_transfer(state: State<'_, AppState>) {
 /// 取消分享：关掉监听，accept 循环自己退出。
 #[tauri::command]
 fn cancel_share(state: State<'_, AppState>) {
+    // 先撤广播再关会话：广播守卫一 drop，局域网里的设备立刻就搜不到了
+    *state.advertisement.lock().unwrap() = None;
     if let Some(s) = state.host.lock().unwrap().take() {
         s.close();
     }
@@ -534,4 +577,39 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("启动 Chuanmen 失败");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 界面读的是 camelCase 字段（`humanBytes`、`totalFiles`…）。
+    ///
+    /// 真机验收抓到的 bug：`rename_all = "camelCase"` 只改**枚举变体名**，
+    /// 不改变体内部的字段名。字段实际发出去是 `human_bytes`，界面拿到
+    /// `undefined`，收尾摘要显示成"1 个文件，共 undefined"。这条测试把
+    /// 线格式钉住，免得以后又悄悄变回 snake_case。
+    #[test]
+    fn ui_events_are_serialized_with_camel_case_fields() {
+        let done = UiEvent::Done {
+            files: 1,
+            texts: 2,
+            bytes: 3,
+            human_bytes: "3 B".to_string(),
+            failures: 1,
+        };
+        let json = serde_json::to_string(&done).unwrap();
+        assert!(json.contains("\"kind\":\"done\""), "{json}");
+        assert!(json.contains("\"humanBytes\":\"3 B\""), "{json}");
+        assert!(!json.contains("human_bytes"), "{json}");
+
+        let peer = UiEvent::PeerConnected {
+            peer: "x".into(),
+            total_files: 2,
+            total_bytes: 10,
+        };
+        let json = serde_json::to_string(&peer).unwrap();
+        assert!(json.contains("\"totalFiles\":2"), "{json}");
+        assert!(json.contains("\"totalBytes\":10"), "{json}");
+    }
 }
