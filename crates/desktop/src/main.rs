@@ -1,4 +1,4 @@
-//! 串门 桌面端（Tauri v2）。
+//! Chuanmen 桌面端（Tauri v2）。
 //!
 //! 这一层刻意做得**很薄**：所有传输逻辑都在 `chuanmen_core` 里，桌面端只做三件事：
 //! 1. 把用户选中的路径交给内核，拿到二维码；
@@ -482,5 +482,5 @@ fn main() {
             inspect_payload
         ])
         .run(tauri::generate_context!())
-        .expect("启动 串门 失败");
+        .expect("启动 Chuanmen 失败");
 }

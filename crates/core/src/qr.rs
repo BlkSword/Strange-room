@@ -9,7 +9,7 @@
 //! | `session_id` | 连的是这个会话而不是别的 |
 //!
 //! 编码成 `cm1:<base64url(JSON)>`。加前缀是为了将来能识别版本、
-//! 并把"这是一段 串门 连接串"和普通文本区分开；用 base64url
+//! 并把"这是一段 Chuanmen 连接串"和普通文本区分开；用 base64url
 //! 是为了避免 `+ / =` 在二维码和终端里的转义麻烦。
 
 use serde::{Deserialize, Serialize};

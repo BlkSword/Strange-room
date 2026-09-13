@@ -1,4 +1,4 @@
-//! `chuan` —— 串门 的命令行客户端。
+//! `chuan` —— Chuanmen 的命令行客户端。
 //!
 //! v1 故意先做 CLI 而不是图形界面：文件传输、断点续传、协议正确性
 //! 这些最难的部分必须能被**自动化测试**和**两台真实机器**反复验证，
@@ -27,7 +27,7 @@ use render::ProgressRenderer;
 #[command(
     name = "chuan",
     version,
-    about = "串门：让同一房间里的设备共享文件。本地直连，不留痕。",
+    about = "Chuanmen：让同一房间里的设备共享文件。本地直连，不留痕。",
     long_about = None
 )]
 struct Cli {

@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "串门",
+  "productName": "Chuanmen",
   "version": "0.1.0",
   "identifier": "com.blksword.chuanmen",
   "build": {
@@ -10,7 +10,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "串门",
+        "title": "Chuanmen",
         "width": 560,
         "height": 720,
         "minWidth": 460,

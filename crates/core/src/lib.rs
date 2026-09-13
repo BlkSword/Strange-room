@@ -1,4 +1,4 @@
-//! `chuanmen-core`：串门 的内核。
+//! `chuanmen-core`：Chuanmen 的内核。
 //!
 //! 这一层**不依赖任何 UI**，因此可以被三种前端复用：
 //! - `chuanmen-cli`（v1 的主验证工具，也是长期的测试资产）

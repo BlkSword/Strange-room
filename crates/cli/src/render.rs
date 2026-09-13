@@ -14,7 +14,7 @@ use chuanmen_core::progress::{eta_seconds, percent, ProgressEvent};
 pub fn print_banner(device_name: &str, summary: &str, port: u16) {
     println!();
     println!("┌─────────────────────────────────────────────┐");
-    println!("│  串门 · 正在等待接收                │");
+    println!("│  Chuanmen · 正在等待接收                │");
     println!("└─────────────────────────────────────────────┘");
     println!("  设备：{device_name}");
     println!("  内容：{summary}");

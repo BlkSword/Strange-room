@@ -754,7 +754,6 @@ struct SessionStart {
     send: quinn::SendStream,
     recv: quinn::RecvStream,
     manifest: FileManifest,
-    state: ResumeState,
     max_chunk_size: u32,
 }
 
@@ -809,24 +808,11 @@ async fn open_session(
         total_bytes: manifest.total_bytes,
     });
 
-    // ---- 3. 准备续传状态 ----
-    tokio::fs::create_dir_all(&opts.dest_dir)
-        .await
-        .map_err(|e| Error::io(&opts.dest_dir, e))?;
-    let mut state = if opts.continue_partial {
-        ResumeState::load(&opts.dest_dir)
-    } else {
-        ResumeState::new(opts.payload.sid.clone())
-    };
-    if state.session_id.is_empty() {
-        state.session_id = opts.payload.sid.clone();
-    }
 
     Ok(SessionStart {
         send,
         recv,
         manifest,
-        state,
         max_chunk_size: server_hello.max_chunk_size,
     })
 }
@@ -845,221 +831,24 @@ async fn transfer_files(
         mut send,
         mut recv,
         manifest,
-        mut state,
         max_chunk_size,
     } = start;
 
     let mut summary = TransferSummary::default();
-    for entry in &manifest.files {
-        opts.cancel.check()?;
-            // 文本条目：不落盘，收完交给界面/终端。
-            // 它和文件走同一套 OFFER/ACK/DATA/RESULT，只是没有 .part、没有续传状态。
-            // 必须放在路径处理**之前**：文本的"名字"是给人看的说明（可能带斜杠等
-            // 路径里不允许的字符），不该拿它去做路径校验。
-            if entry.kind == ItemKind::Text {
-                match receive_text_item(
-                    &conn,
-                    &mut send,
-                    &mut recv,
-                    entry,
-                    max_chunk_size,
-                    progress,
-                    &opts.cancel,
-                )
-                .await
-                {
-                    Ok(text) => {
-                        summary.bytes_sent += entry.size;
-                        progress.send(ProgressEvent::TextReceived {
-                            label: entry.relative_path.clone(),
-                            text: text.clone(),
-                        });
-                        summary.texts.push((entry.relative_path.clone(), text));
-                        let _ = write_frame(
-                            &mut send,
-                            &Frame::json(
-                                KIND_RESULT,
-                                &TransferResult {
-                                    file_id: entry.file_id.clone(),
-                                    ok: true,
-                                    error: None,
-                                },
-                            )?,
-                        )
-                        .await;
-                        drain_result(&mut recv, &entry.file_id).await?;
-                        continue;
-                    }
-                    Err(e) => {
-                        if matches!(e, Error::Cancelled) {
-                            return Err(e);
-                        }
-                        // 和文件同样的策略：传一半失败必须结束整次会话，避免单流失步
-                        let msg = e.to_string();
-                        progress.send(ProgressEvent::Warn(format!(
-                            "{} 没能收到：{msg}",
-                            entry.relative_path
-                        )));
-                        summary.failures.push((entry.relative_path.clone(), msg.clone()));
-                        let _ = write_frame(
-                            &mut send,
-                            &Frame::json(
-                                KIND_RESULT,
-                                &TransferResult {
-                                    file_id: entry.file_id.clone(),
-                                    ok: false,
-                                    error: Some(msg),
-                                },
-                            )?,
-                        )
-                        .await;
-                        return Err(e);
-                    }
-                }
-            }
-
-        let rel = fs_util::safe_relative_path(&entry.relative_path)?;
-        let target = fs_util::join_checked(&opts.dest_dir, &rel);
-        let part = fs_util::part_path(&target);
-
-        // 已完成的文件直接跳过（这才是"断点续传"里省时间的部分：
-        // 重连后不重传已经收好的文件）
-        let have = state.resume_offset(&entry.file_id, &part, entry.size);
-        if have >= entry.size && entry.size > 0 {
-            // 已经从上次会话收完了？重新校验一遍再确认，不能只看状态文件
-            let part_hash_ok = match fs_util::hash_file(&part) {
-                Ok(h) => hex::encode(h.as_bytes()).eq_ignore_ascii_case(&entry.blake3),
-                Err(_) => false,
-            };
-            if part_hash_ok {
-                fs_util::atomic_rename(&part, &target)?;
-                state.upsert(PartialFile {
-                    relative_path: entry.relative_path.clone(),
-                    file_id: entry.file_id.clone(),
-                    total_size: entry.size,
-                    partial: entry.size,
-                    partial_hash: None,
-                    completed: true,
-                });
-                progress.send(ProgressEvent::FileFinished {
-                    file_id: entry.file_id.clone(),
-                    relative_path: entry.relative_path.clone(),
-                });
-                summary.files_sent += 1;
-                summary.bytes_sent += entry.size;
-                continue;
-            }
-            // 校验没过：删掉重来
-            let _ = std::fs::remove_file(&part);
-        }
-
-        // 本地准备必须在**发 OFFER 之前**做完，理由见 prepare_target 的注释：
-        // 这一步一旦失败而又已经发过 OFFER，主机推来的数据就没人接，
-        // 整个单流会话会失步（后面所有文件都跟着完蛋）。
-        // 放在前面失败，最坏也只是"这个文件跳过"，会话继续。
-        if let Err(e) = prepare_target(&part, entry.size, have).await {
-            let msg = e.to_string();
-            progress.send(ProgressEvent::Warn(format!(
-                "跳过 {}：{msg}",
-                entry.relative_path
-            )));
-            summary.failures.push((entry.relative_path.clone(), msg));
-            continue;
-        }
-
-        let offer = FileOffer {
-            file_id: entry.file_id.clone(),
-            relative_path: entry.relative_path.clone(),
-            size: entry.size,
-            blake3: entry.blake3.clone(),
-            have_bytes: have,
-            chunk_size: max_chunk_size,
-        };
-        write_frame(&mut send, &Frame::json(KIND_OFFER, &offer)?).await?;
-
-        let frame = read_frame(&mut recv)
-            .await?
-            .ok_or_else(|| Error::protocol("主机在协商阶段断开"))?;
-        frame.expect_kind(KIND_ACK, "续传确认")?;
-        let ack: OfferAck = frame.decode_json()?;
-        let start_offset = ack.start_offset.min(entry.size);
-
-        let received = match receive_one_file(
-            &mut recv,
-            &entry.file_id,
-            &entry.relative_path,
-            &target,
-            &part,
-            entry.size,
-            start_offset,
-            &entry.blake3,
-            &mut state,
-            &opts.dest_dir,
-            progress,
-            &opts.cancel,
-        )
-        .await
-        {
-            Ok(n) => n,
-            Err(e) => {
-                // 取消不是"某个文件失败了"，而是整次接收停止：直接退出，
-                // 绝不能记成失败后继续下一个文件
-                if matches!(e, Error::Cancelled) {
-                    return Err(e);
-                }
-                // 传一半才失败（磁盘写错、对端断开、校验不符……）必须**结束整次会话**，
-                // 不能"记一笔失败，接着协商下一个文件"。
-                //
-                // 原因：主机此刻还在按自己的节奏推这个文件的数据，接收端如果跳去谈
-                // 下一个文件，流上剩下的数据帧会被当成控制帧解析，单流会话就此失步
-                // （实测报错是"期望续传确认（帧类型 3），实际收到帧类型 4"）。
-                // 结束会话是安全的一侧：已收到的部分和检查点都留着，用户重跑一次
-                // 就能从这个文件的断点续上，而不是留下一个静默错乱的状态。
-                let msg = e.to_string();
-                progress.send(ProgressEvent::Warn(format!(
-                    "{} 中断：{msg}；已收到的部分已保留，重新运行可续传",
-                    entry.relative_path
-                )));
-                summary.failures.push((entry.relative_path.clone(), msg.clone()));
-                // 尽力通知主机（它此刻多半在写，看不到这条，但正常收尾时用得上）
-                let _ = write_frame(
-                    &mut send,
-                    &Frame::json(
-                        KIND_RESULT,
-                        &TransferResult {
-                            file_id: entry.file_id.clone(),
-                            ok: false,
-                            error: Some(msg),
-                        },
-                    )?,
-                )
-                .await;
-                return Err(e);
-            }
-        };
-
-        summary.files_sent += 1;
-        summary.bytes_sent += received;
-
-        let _ = write_frame(
-            &mut send,
-            &Frame::json(
-                KIND_RESULT,
-                &TransferResult {
-                    file_id: entry.file_id.clone(),
-                    ok: true,
-                    error: None,
-                },
-            )?,
-        )
-        .await;
-
-        // 必须等主机对 RESULT 的回应，否则会话会失去同步：
-        // 主机在文件发完后会读下一个 OFFER，而我们如果直接进入下一个
-        // 文件或发 BYE，主机就会读到"意外帧"。这里同步一次，让双方的
-        // 收发永远成对。
-        drain_result(&mut recv, &entry.file_id).await?;
-    }
+    pull_items(
+        conn,
+        &mut send,
+        &mut recv,
+        &manifest.files,
+        &opts.dest_dir,
+        &opts.payload.sid,
+        opts.continue_partial,
+        max_chunk_size,
+        progress,
+        &opts.cancel,
+        &mut summary,
+    )
+    .await?;
 
     let _ = write_frame(
         &mut send,
@@ -1149,6 +938,251 @@ async fn prepare_target(part: &Path, total_size: u64, start_offset: u64) -> Resu
     })
     .await
     .map_err(|e| Error::protocol(format!("预分配任务失败：{e}")))??;
+    Ok(())
+}
+
+/// 收下一批条目（文件落盘、文本进内存）。
+///
+/// 主机的"发"和接收端的"收"原来写死在各自那一侧；双向房间要求**两边都能收**，
+/// 所以这段被抽出来复用：谁收东西谁调它，与它在会话里扮演什么角色无关。
+/// 战果累加到调用方传进来的 `summary` 上（一次会话可能两个方向都有收获）。
+#[allow(clippy::too_many_arguments)]
+async fn pull_items(
+    conn: &quinn::Connection,
+    send: &mut quinn::SendStream,
+    recv: &mut quinn::RecvStream,
+    entries: &[FileEntry],
+    dest_dir: &Path,
+    session_id: &str,
+    continue_partial: bool,
+    max_chunk_size: u32,
+    progress: &ProgressSender,
+    cancel: &CancelToken,
+    summary: &mut TransferSummary,
+) -> Result<()> {
+    // ---- 3. 准备续传状态 ----
+    tokio::fs::create_dir_all(&dest_dir)
+    .await
+    .map_err(|e| Error::io(&dest_dir, e))?;
+    let mut state = if continue_partial {
+    ResumeState::load(&dest_dir)
+    } else {
+    ResumeState::new(session_id.clone())
+    };
+    if state.session_id.is_empty() {
+    state.session_id = session_id.to_string();
+    }
+
+    for entry in entries {
+        cancel.check()?;
+            // 文本条目：不落盘，收完交给界面/终端。
+            // 它和文件走同一套 OFFER/ACK/DATA/RESULT，只是没有 .part、没有续传状态。
+            // 必须放在路径处理**之前**：文本的"名字"是给人看的说明（可能带斜杠等
+            // 路径里不允许的字符），不该拿它去做路径校验。
+            if entry.kind == ItemKind::Text {
+                match receive_text_item(
+                    &conn,
+                    send,
+                    recv,
+                    entry,
+                    max_chunk_size,
+                    progress,
+                    &cancel,
+                )
+                .await
+                {
+                    Ok(text) => {
+                        summary.bytes_sent += entry.size;
+                        progress.send(ProgressEvent::TextReceived {
+                            label: entry.relative_path.clone(),
+                            text: text.clone(),
+                        });
+                        summary.texts.push((entry.relative_path.clone(), text));
+                        let _ = write_frame(
+                            send,
+                            &Frame::json(
+                                KIND_RESULT,
+                                &TransferResult {
+                                    file_id: entry.file_id.clone(),
+                                    ok: true,
+                                    error: None,
+                                },
+                            )?,
+                        )
+                        .await;
+                        drain_result(recv, &entry.file_id).await?;
+                        continue;
+                    }
+                    Err(e) => {
+                        if matches!(e, Error::Cancelled) {
+                            return Err(e);
+                        }
+                        // 和文件同样的策略：传一半失败必须结束整次会话，避免单流失步
+                        let msg = e.to_string();
+                        progress.send(ProgressEvent::Warn(format!(
+                            "{} 没能收到：{msg}",
+                            entry.relative_path
+                        )));
+                        summary.failures.push((entry.relative_path.clone(), msg.clone()));
+                        let _ = write_frame(
+                            send,
+                            &Frame::json(
+                                KIND_RESULT,
+                                &TransferResult {
+                                    file_id: entry.file_id.clone(),
+                                    ok: false,
+                                    error: Some(msg),
+                                },
+                            )?,
+                        )
+                        .await;
+                        return Err(e);
+                    }
+                }
+            }
+
+        let rel = fs_util::safe_relative_path(&entry.relative_path)?;
+        let target = fs_util::join_checked(&dest_dir, &rel);
+        let part = fs_util::part_path(&target);
+
+        // 已完成的文件直接跳过（这才是"断点续传"里省时间的部分：
+        // 重连后不重传已经收好的文件）
+        let have = state.resume_offset(&entry.file_id, &part, entry.size);
+        if have >= entry.size && entry.size > 0 {
+            // 已经从上次会话收完了？重新校验一遍再确认，不能只看状态文件
+            let part_hash_ok = match fs_util::hash_file(&part) {
+                Ok(h) => hex::encode(h.as_bytes()).eq_ignore_ascii_case(&entry.blake3),
+                Err(_) => false,
+            };
+            if part_hash_ok {
+                fs_util::atomic_rename(&part, &target)?;
+                state.upsert(PartialFile {
+                    relative_path: entry.relative_path.clone(),
+                    file_id: entry.file_id.clone(),
+                    total_size: entry.size,
+                    partial: entry.size,
+                    partial_hash: None,
+                    completed: true,
+                });
+                progress.send(ProgressEvent::FileFinished {
+                    file_id: entry.file_id.clone(),
+                    relative_path: entry.relative_path.clone(),
+                });
+                summary.files_sent += 1;
+                summary.bytes_sent += entry.size;
+                continue;
+            }
+            // 校验没过：删掉重来
+            let _ = std::fs::remove_file(&part);
+        }
+
+        // 本地准备必须在**发 OFFER 之前**做完，理由见 prepare_target 的注释：
+        // 这一步一旦失败而又已经发过 OFFER，主机推来的数据就没人接，
+        // 整个单流会话会失步（后面所有文件都跟着完蛋）。
+        // 放在前面失败，最坏也只是"这个文件跳过"，会话继续。
+        if let Err(e) = prepare_target(&part, entry.size, have).await {
+            let msg = e.to_string();
+            progress.send(ProgressEvent::Warn(format!(
+                "跳过 {}：{msg}",
+                entry.relative_path
+            )));
+            summary.failures.push((entry.relative_path.clone(), msg));
+            continue;
+        }
+
+        let offer = FileOffer {
+            file_id: entry.file_id.clone(),
+            relative_path: entry.relative_path.clone(),
+            size: entry.size,
+            blake3: entry.blake3.clone(),
+            have_bytes: have,
+            chunk_size: max_chunk_size,
+        };
+        write_frame(send, &Frame::json(KIND_OFFER, &offer)?).await?;
+
+        let frame = read_frame(recv)
+            .await?
+            .ok_or_else(|| Error::protocol("主机在协商阶段断开"))?;
+        frame.expect_kind(KIND_ACK, "续传确认")?;
+        let ack: OfferAck = frame.decode_json()?;
+        let start_offset = ack.start_offset.min(entry.size);
+
+        let received = match receive_one_file(
+            recv,
+            &entry.file_id,
+            &entry.relative_path,
+            &target,
+            &part,
+            entry.size,
+            start_offset,
+            &entry.blake3,
+            &mut state,
+            &dest_dir,
+            progress,
+            &cancel,
+        )
+        .await
+        {
+            Ok(n) => n,
+            Err(e) => {
+                // 取消不是"某个文件失败了"，而是整次接收停止：直接退出，
+                // 绝不能记成失败后继续下一个文件
+                if matches!(e, Error::Cancelled) {
+                    return Err(e);
+                }
+                // 传一半才失败（磁盘写错、对端断开、校验不符……）必须**结束整次会话**，
+                // 不能"记一笔失败，接着协商下一个文件"。
+                //
+                // 原因：主机此刻还在按自己的节奏推这个文件的数据，接收端如果跳去谈
+                // 下一个文件，流上剩下的数据帧会被当成控制帧解析，单流会话就此失步
+                // （实测报错是"期望续传确认（帧类型 3），实际收到帧类型 4"）。
+                // 结束会话是安全的一侧：已收到的部分和检查点都留着，用户重跑一次
+                // 就能从这个文件的断点续上，而不是留下一个静默错乱的状态。
+                let msg = e.to_string();
+                progress.send(ProgressEvent::Warn(format!(
+                    "{} 中断：{msg}；已收到的部分已保留，重新运行可续传",
+                    entry.relative_path
+                )));
+                summary.failures.push((entry.relative_path.clone(), msg.clone()));
+                // 尽力通知主机（它此刻多半在写，看不到这条，但正常收尾时用得上）
+                let _ = write_frame(
+                    send,
+                    &Frame::json(
+                        KIND_RESULT,
+                        &TransferResult {
+                            file_id: entry.file_id.clone(),
+                            ok: false,
+                            error: Some(msg),
+                        },
+                    )?,
+                )
+                .await;
+                return Err(e);
+            }
+        };
+
+        summary.files_sent += 1;
+        summary.bytes_sent += received;
+
+        let _ = write_frame(
+            send,
+            &Frame::json(
+                KIND_RESULT,
+                &TransferResult {
+                    file_id: entry.file_id.clone(),
+                    ok: true,
+                    error: None,
+                },
+            )?,
+        )
+        .await;
+
+        // 必须等主机对 RESULT 的回应，否则会话会失去同步：
+        // 主机在文件发完后会读下一个 OFFER，而我们如果直接进入下一个
+        // 文件或发 BYE，主机就会读到"意外帧"。这里同步一次，让双方的
+        // 收发永远成对。
+        drain_result(recv, &entry.file_id).await?;
+    }
     Ok(())
 }
 

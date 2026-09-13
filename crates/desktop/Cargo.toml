@@ -3,7 +3,7 @@ name = "chuanmen-desktop"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "串门 桌面端（Tauri v2）"
+description = "Chuanmen 桌面端（Tauri v2）"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
