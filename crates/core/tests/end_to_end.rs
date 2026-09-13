@@ -12,10 +12,10 @@ use std::time::Duration;
 
 mod common;
 
-use coalesce_core::net::quic::{HostOptions, HostSession, Receiver, ReceiverOptions, TransferSummary};
-use coalesce_core::progress::ProgressSender;
-use coalesce_core::qr::QrPayload;
-use coalesce_core::{plan_paths, TransferPlan};
+use chuanmen_core::net::quic::{HostOptions, HostSession, Receiver, ReceiverOptions, TransferSummary};
+use chuanmen_core::progress::ProgressSender;
+use chuanmen_core::qr::QrPayload;
+use chuanmen_core::{plan_paths, TransferPlan};
 
 /// 建一个临时目录，返回 (守卫, 路径)。守卫 drop 时目录自动删除。
 fn tmp() -> (tempfile::TempDir, PathBuf) { common::tmp() }
@@ -47,14 +47,14 @@ fn local_payload(session: &HostSession) -> QrPayload {
         session.session_id.clone(),
         session.device_name().to_string(),
         session.fingerprint().to_string(),
-        vec![coalesce_core::AddressHint {
+        vec![chuanmen_core::AddressHint {
             host: "127.0.0.1".to_string(),
             port: session.port(),
         }],
     )
 }
 
-fn spawn_host_task(session: HostSession) -> tokio::task::JoinHandle<coalesce_core::Result<TransferSummary>> {
+fn spawn_host_task(session: HostSession) -> tokio::task::JoinHandle<chuanmen_core::Result<TransferSummary>> {
     let progress = ProgressSender::new();
     tokio::spawn(async move {
         // 给接收端一点时间先启动，避免时序上主机 accept 不到连接（实际不会丢，
@@ -82,7 +82,7 @@ async fn transfers_a_text_item_alongside_a_file() {
     // 一次同时发：一个文件 + 一段文本（链接）
     let mut plan = plan_paths(&[file]).unwrap();
     let text = "https://example.com/一个链接?带参数=1\n第二行：中文也要原样到达";
-    coalesce_core::transfer::plan::append_text(&mut plan, "一个链接", text).unwrap();
+    chuanmen_core::transfer::plan::append_text(&mut plan, "一个链接", text).unwrap();
     assert_eq!(plan.files.len(), 2, "清单里应当有一个文件 + 一段文本");
 
     let session = start_host(plan).await;
@@ -95,7 +95,7 @@ async fn transfers_a_text_item_alongside_a_file() {
             dest_dir: dst.clone(),
             device_name: "测试接收端".to_string(),
             continue_partial: true,
-            cancel: coalesce_core::CancelToken::new(),
+            cancel: chuanmen_core::CancelToken::new(),
         },
         &ProgressSender::new(),
     )
@@ -148,7 +148,7 @@ async fn transfers_a_single_file_and_verifies_hash() {
             dest_dir: dst.clone(),
             device_name: "测试接收端".to_string(),
             continue_partial: true,
-            cancel: coalesce_core::CancelToken::new(),
+            cancel: chuanmen_core::CancelToken::new(),
         },
         &ProgressSender::new(),
     )
@@ -204,7 +204,7 @@ async fn a_blocked_destination_skips_that_file_without_breaking_the_session() {
             dest_dir: dst.clone(),
             device_name: "r".into(),
             continue_partial: true,
-            cancel: coalesce_core::CancelToken::new(),
+            cancel: chuanmen_core::CancelToken::new(),
         },
         &ProgressSender::new(),
     )
@@ -251,7 +251,7 @@ async fn transfers_a_folder_preserving_structure() {
             dest_dir: dst.clone(),
             device_name: "r".into(),
             continue_partial: true,
-            cancel: coalesce_core::CancelToken::new(),
+            cancel: chuanmen_core::CancelToken::new(),
         },
         &ProgressSender::new(),
     )
@@ -283,7 +283,7 @@ async fn refuses_to_connect_when_fingerprint_does_not_match() {
     let session = start_host(plan).await;
     // 篡改指纹：模拟"二维码被人换过"或"连到了冒充的主机"
     let mut payload = local_payload(&session);
-    payload.fp = "f".repeat(coalesce_core::identity::FINGERPRINT_LEN * 2);
+    payload.fp = "f".repeat(chuanmen_core::identity::FINGERPRINT_LEN * 2);
 
     // 主机必须真的在 accept：否则握手根本走不完，我们测到的就只是"超时"
     // 而不是"指纹被拒"——那样这个安全断言等于没测。
@@ -298,7 +298,7 @@ async fn refuses_to_connect_when_fingerprint_does_not_match() {
                 dest_dir: dst.clone(),
                 device_name: "r".into(),
                 continue_partial: true,
-                cancel: coalesce_core::CancelToken::new(),
+                cancel: chuanmen_core::CancelToken::new(),
             },
             &ProgressSender::new(),
         ),
@@ -361,7 +361,7 @@ async fn empty_files_are_handled() {
             dest_dir: dst.clone(),
             device_name: "r".into(),
             continue_partial: true,
-            cancel: coalesce_core::CancelToken::new(),
+            cancel: chuanmen_core::CancelToken::new(),
         },
         &ProgressSender::new(),
     )
@@ -401,7 +401,7 @@ async fn rejects_a_stale_session_id() {
                 dest_dir: dst.clone(),
                 device_name: "r".into(),
                 continue_partial: true,
-                cancel: coalesce_core::CancelToken::new(),
+                cancel: chuanmen_core::CancelToken::new(),
             },
             &ProgressSender::new(),
         ),
@@ -449,16 +449,16 @@ async fn diagnostics_reports_reachable_for_a_live_host() {
     let payload = local_payload(&session);
     let host = spawn_host_task(session);
 
-    let d = coalesce_core::diag::diagnose(&payload).await.expect("自检本身不该失败");
+    let d = chuanmen_core::diag::diagnose(&payload).await.expect("自检本身不该失败");
     assert_eq!(
         d.verdict,
-        coalesce_core::Verdict::Reachable,
+        chuanmen_core::Verdict::Reachable,
         "对运行中的主机自检应判定可达，实际 {:?}：{}",
         d.verdict,
         d.summary
     );
     assert!(
-        d.probes.iter().any(|p| p.outcome == coalesce_core::ProbeOutcome::Reachable),
+        d.probes.iter().any(|p| p.outcome == chuanmen_core::ProbeOutcome::Reachable),
         "至少要有一个地址探测成功"
     );
     let _ = tokio::time::timeout(Duration::from_secs(20), host).await;
@@ -472,20 +472,20 @@ async fn diagnostics_reports_reachable_for_a_live_host() {
 #[tokio::test(flavor = "multi_thread")]
 async fn diagnostics_on_a_dead_address_is_not_optimistic() {
     common::isolated_env();
-    let payload = coalesce_core::QrPayload::new(
+    let payload = chuanmen_core::QrPayload::new(
         "no-such-session",
         "不存在的主机",
-        "f".repeat(coalesce_core::identity::FINGERPRINT_LEN * 2),
-        vec![coalesce_core::AddressHint {
+        "f".repeat(chuanmen_core::identity::FINGERPRINT_LEN * 2),
+        vec![chuanmen_core::AddressHint {
             host: "127.0.0.1".to_string(),
             port: 1,
         }],
     );
 
-    let d = coalesce_core::diag::diagnose(&payload).await.expect("自检本身不该失败");
-    assert_ne!(d.verdict, coalesce_core::Verdict::Reachable, "不该把不通的报成可达");
+    let d = chuanmen_core::diag::diagnose(&payload).await.expect("自检本身不该失败");
+    assert_ne!(d.verdict, chuanmen_core::Verdict::Reachable, "不该把不通的报成可达");
     assert!(
-        !d.probes.is_empty() && d.probes.iter().all(|p| p.outcome != coalesce_core::ProbeOutcome::Reachable),
+        !d.probes.is_empty() && d.probes.iter().all(|p| p.outcome != chuanmen_core::ProbeOutcome::Reachable),
         "不该有地址被判为可达"
     );
     assert!(!d.advice.is_empty(), "结论之外必须给出可操作的建议");

@@ -19,7 +19,7 @@ pub fn isolated_env() {
         // SAFETY：只在测试里调用，且通过 OnceLock 保证只执行一次，
         // 此时其它线程尚未开始读取该变量（测试函数都在初始化之后才启动端点）。
         unsafe {
-            std::env::set_var("COA_DATA_DIR", dir.path());
+            std::env::set_var("CHUAN_DATA_DIR", dir.path());
         }
         dir
     });

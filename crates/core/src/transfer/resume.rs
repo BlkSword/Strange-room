@@ -238,7 +238,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn tmpdir() -> PathBuf {
-        let d = std::env::temp_dir().join(format!("coa-resume-{}", uuid::Uuid::new_v4()));
+        let d = std::env::temp_dir().join(format!("chuan-resume-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&d).unwrap();
         d
     }

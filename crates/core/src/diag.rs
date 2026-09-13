@@ -225,7 +225,7 @@ fn classify(local: Option<IpAddr>, probes: &[ProbeReport]) -> Diagnosis {
             "地址可达性未知：对面完全没有响应。".to_string(),
             vec![
                 "最常见的原因是主机上的防火墙拦住了。Windows 首次运行时会弹窗询问，\
-                 如果当时点了\"取消\"，需要在防火墙设置里手动允许 Coalesce。"
+                 如果当时点了\"取消\"，需要在防火墙设置里手动允许 串门。"
                     .to_string(),
                 "其次是 WiFi 的 AP 隔离（访客网络常见）：同一个 WiFi 下设备之间也不能互访。"
                     .to_string(),

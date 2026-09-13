@@ -15,7 +15,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use crate::error::{Error, Result};
 
 /// 自签证书里使用的占位名字。因为校验只认指纹，域名不参与判断。
-pub const SERVER_NAME: &str = "coalesce.local";
+pub const SERVER_NAME: &str = "chuanmen.local";
 
 /// 证书指纹算法：BLAKE3 输出前 16 字节（128 位），hex 编码后 32 个字符。
 ///
@@ -58,7 +58,7 @@ pub fn fingerprint_of(cert_der: &[u8]) -> String {
 }
 
 const IDENTITY_FILE: &str = "identity.bin";
-const IDENTITY_MAGIC: &[u8; 8] = b"COALESC1";
+const IDENTITY_MAGIC: &[u8; 8] = b"LANSESS1";
 
 /// 把身份编码成单一字节串。证书与私钥必须一起发布，否则会出现错配。
 fn encode_identity(id: &Identity) -> Vec<u8> {
@@ -205,11 +205,11 @@ impl Identity {
 
     /// 用户数据目录，按平台约定。
     pub fn default_dir() -> PathBuf {
-        if let Ok(dir) = std::env::var("COA_DATA_DIR") {
+        if let Ok(dir) = std::env::var("CHUAN_DATA_DIR") {
             return PathBuf::from(dir);
         }
         let base = dirs_fallback();
-        base.join("coalesce")
+        base.join("chuanmen")
     }
 }
 
@@ -331,7 +331,7 @@ mod tests {
 
     #[test]
     fn load_or_create_persists_fingerprint() {
-        let dir = std::env::temp_dir().join(format!("coa-id-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("chuan-id-{}", uuid::Uuid::new_v4()));
         let first = Identity::load_or_create(&dir).unwrap();
         let second = Identity::load_or_create(&dir).unwrap();
         assert_eq!(first.fingerprint, second.fingerprint);

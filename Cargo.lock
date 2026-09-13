@@ -500,6 +500,61 @@ dependencies = [
 ]
 
 [[package]]
+name = "chuanmen-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chuanmen-core",
+ "clap",
+ "indicatif",
+ "qrcode",
+ "tokio",
+]
+
+[[package]]
+name = "chuanmen-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "chacha20poly1305",
+ "ed25519-dalek",
+ "futures",
+ "hex",
+ "hkdf",
+ "libc",
+ "mdns-sd",
+ "quinn",
+ "rand",
+ "rcgen",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "socket2",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "uuid",
+ "walkdir",
+]
+
+[[package]]
+name = "chuanmen-desktop"
+version = "0.1.0"
+dependencies = [
+ "chuanmen-core",
+ "qrcode",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tokio",
+]
+
+[[package]]
 name = "cipher"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -555,61 +610,6 @@ name = "cmov"
 version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
-
-[[package]]
-name = "coalesce-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "coalesce-core",
- "indicatif",
- "qrcode",
- "tokio",
-]
-
-[[package]]
-name = "coalesce-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "blake3",
- "chacha20poly1305",
- "ed25519-dalek",
- "futures",
- "hex",
- "hkdf",
- "libc",
- "mdns-sd",
- "quinn",
- "rand",
- "rcgen",
- "rustls",
- "rustls-pki-types",
- "serde",
- "serde_json",
- "socket2",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "tokio-util",
- "uuid",
- "walkdir",
-]
-
-[[package]]
-name = "coalesce-desktop"
-version = "0.1.0"
-dependencies = [
- "coalesce-core",
- "qrcode",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tokio",
-]
 
 [[package]]
 name = "colorchoice"

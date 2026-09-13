@@ -38,10 +38,10 @@ async fn get(port: u16, path: &str) -> (u16, Vec<u8>) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn serves_the_page_payload_and_client_binary() {
-    let payload = "coa1:测试用连接串";
+    let payload = "cm1:测试用连接串";
     let client_bytes = vec![7u8; 4096];
 
-    let server = coalesce_core::BootstrapServer::start(
+    let server = chuanmen_core::BootstrapServer::start(
         payload.to_string(),
         "我的笔记本".to_string(),
         client_bytes.clone(),
@@ -79,8 +79,8 @@ async fn serves_the_page_payload_and_client_binary() {
 #[tokio::test(flavor = "multi_thread")]
 async fn device_name_and_payload_are_escaped_in_the_page() {
     // 设备名是用户自己起的，连接串来自协议；两者都可能带尖括号，必须转义
-    let server = coalesce_core::BootstrapServer::start(
-        "coa1:x\"y<z>".to_string(),
+    let server = chuanmen_core::BootstrapServer::start(
+        "cm1:x\"y<z>".to_string(),
         "<img src=x onerror=alert(1)>".to_string(),
         vec![1, 2, 3],
     )

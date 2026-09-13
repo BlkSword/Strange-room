@@ -4,7 +4,7 @@
 //! 里的二维码和真机上的长得一样，而不是"画一个差不多的"。
 
 fn main() {
-    use coalesce_core::{AddressHint, QrPayload};
+    use chuanmen_core::{AddressHint, QrPayload};
 
     let payload = QrPayload::new(
         "8f3c1d2e-7a41-4b90-9d2c-1e6f0a7b3c55",

@@ -1,6 +1,8 @@
-# Coalesce
+# 串门
 
-**让物理上同处一室的人，像把设备摊在同一张桌子上一样共享东西。**
+**串门（Chuanmen）——去邻居家坐一会儿：不用预约、不用准备、走的时候不留痕迹。**
+
+落到产品上就是：让物理上同处一室的人，像把设备摊在同一张桌子上一样共享东西。
 
 局域网直连，扫码即连，传完不留痕。没有账号，没有云端，不是网盘。
 
@@ -24,7 +26,7 @@
 | U 盘 | 要拔插，还要找到那个 U 盘 |
 | AirDrop | 只认苹果设备 |
 
-Coalesce 的做法：你在自己电脑上开一个房间，屏幕上出现二维码；
+串门 的做法：你在自己电脑上开一个房间，屏幕上出现二维码；
 对方扫一下就连上，文件走局域网直传。1GB 是几秒钟的事，不是"等着上传"。
 
 ## 现在能做什么
@@ -46,39 +48,39 @@ Coalesce 的做法：你在自己电脑上开一个房间，屏幕上出现二�
 cargo build --release
 
 # 分享文件（会打印二维码，同时向局域网广播）
-./target/release/coa send ./photos
+./target/release/chuan send ./photos
 
 # 也可以只发一段文字 / 一个链接（对方不用落盘，直接看到）
-./target/release/coa send --text "把这段字送到那台机器上"
+./target/release/chuan send --text "把这段字送到那台机器上"
 
 # 文件和文字可以一起发
-./target/release/coa send ./报告.pdf --text "链接：https://example.com"
+./target/release/chuan send ./报告.pdf --text "链接：https://example.com"
 
 # 接收：不用扫码、不用粘贴，会列出附近正在分享的设备让你挑
-./target/release/coa receive --to ./downloads
+./target/release/chuan receive --to ./downloads
 
 # 也可以直接带连接串（扫码/粘贴得到的那串）
-./target/release/coa receive "coa1:..." --to ./downloads
+./target/release/chuan receive "cm1:..." --to ./downloads
 
 # 单独看看附近有谁在分享（发现不到设备时用它排查）
-./target/release/coa discover
+./target/release/chuan discover
 
 # 网络自检：连不上时用它判断问题出在哪
-./target/release/coa diagnose "coa1:..."
+./target/release/chuan diagnose "cm1:..."
 ```
 
-`coa send` 支持 `--port`、`--name`、`--no-qr`（只打印连接串，适合远程终端）。
-`coa receive` 不带连接串时先发现附近设备；只有一台就直接连，多台会让你选序号。
+`chuan send` 支持 `--port`、`--name`、`--no-qr`（只打印连接串，适合远程终端）。
+`chuan receive` 不带连接串时先发现附近设备；只有一台就直接连，多台会让你选序号。
 
 ### 桌面端怎么跑
 
 ```bash
-cargo run -p coalesce-desktop
+cargo run -p chuanmen-desktop
 ```
 
 > 注意：仓库的 workspace 配置了 `default-members = ["crates/core", "crates/cli"]`，
 > 所以日常的 `cargo build` / `cargo test` **不会**构建 Tauri（它的编译产物有 1–3 GB）。
-> 只有显式 `-p coalesce-desktop` 时才会。
+> 只有显式 `-p chuanmen-desktop` 时才会。
 
 
 ---
@@ -103,7 +105,7 @@ cargo run -p coalesce-desktop
 
 ### 速度，以及为什么曾经慢
 
-先给数字。回环基准（`cargo run --release --example bench -p coalesce-core -- 512`，
+先给数字。回环基准（`cargo run --release --example bench -p chuanmen-core -- 512`，
 在一台 2 核 / 2.6 GHz 的虚拟机上）：
 
 | 项目 | 速度 |
@@ -139,7 +141,7 @@ WiFi（30–80 MB/s）上，**瓶颈已经回到链路本身**，不再是这个
 二维码里不只是地址，还有**会话 ID** 与**主机证书指纹**：
 
 ```
-coa1:eyJ2IjoxLCJzaWQiOiI4ZjNj…   （base64url 编码的 JSON）
+cm1:eyJ2IjoxLCJzaWQiOiI4ZjNj…   （base64url 编码的 JSON）
 ```
 
 这让"怎么找到对方"和"怎么信任对方"用同一个动作解决——不需要 CA，不需要账号，
@@ -166,7 +168,7 @@ QUIC（`quinn`）自带加密与多路复用；用单条双向流跑完整会话
 
 ```
 crates/core     内核：传输、协议、加密、续传、自检。不依赖任何 UI
-crates/cli      coa send / receive / diagnose —— 也是长期的测试资产
+crates/cli      chuan send / receive / diagnose —— 也是长期的测试资产
 crates/desktop  Tauri v2 桌面端：薄桥接层 + 原生 HTML/CSS/JS，不引前端框架
 ```
 
@@ -206,11 +208,11 @@ sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appi
 ```bash
 cargo test              # 内核 + CLI（默认成员），104 个用例
 cargo test --workspace  # 连桌面端一起构建
-cargo run -p coalesce-desktop # 跑桌面端
+cargo run -p chuanmen-desktop # 跑桌面端
 
 # 吞吐基准（回环，去掉网络变量）。这是长期的性能护栏：
 # 任何改动让吞吐掉了，这里立刻能看出来。
-cargo run --release --example bench -p coalesce-core -- 512
+cargo run --release --example bench -p chuanmen-core -- 512
 ```
 
 测试里包含真实起两个 QUIC 端点互传文件的端到端用例，以及「中断后重连只补差额」、
@@ -233,10 +235,10 @@ cargo run --release --example bench -p coalesce-core -- 512
 **已知限制**（现在还没有的，不要期待）：
 
 - **自动发现依赖 mDNS**。访客网络开了 AP 隔离、企业网络禁组播、防火墙拦掉 UDP 5353、
-  或者本机有别的程序占着 5353 时，都搜不到设备（`coa discover` 可以判断属于哪种情况）。
+  或者本机有别的程序占着 5353 时，都搜不到设备（`chuan discover` 可以判断属于哪种情况）。
   这些情况下**扫码和粘贴连接串照样可用**——发现只是便利，不是必要条件。
 - **没有公网能力**。仅限同一局域网；跨网段、AP 隔离、企业防火墙会连不上——
-  这种情况下用 `coa diagnose` 或界面上的「诊断网络」定位。
+  这种情况下用 `chuan diagnose` 或界面上的「诊断网络」定位。
 - **没有移动端**。
 - **没有安装包与签名**。客户端可以自己分发（引导页把当前 exe 给对方），但下下来的是
   未签名的 exe，Windows SmartScreen / 杀毒软件可能提示；桌面端的引导页也还没接上。

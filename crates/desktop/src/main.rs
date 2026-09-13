@@ -1,6 +1,6 @@
-//! Coalesce 桌面端（Tauri v2）。
+//! 串门 桌面端（Tauri v2）。
 //!
-//! 这一层刻意做得**很薄**：所有传输逻辑都在 `coalesce_core` 里，桌面端只做三件事：
+//! 这一层刻意做得**很薄**：所有传输逻辑都在 `chuanmen_core` 里，桌面端只做三件事：
 //! 1. 把用户选中的路径交给内核，拿到二维码；
 //! 2. 把内核的 `ProgressEvent` 翻译成界面用的 JSON 事件；
 //! 3. 处理取消。
@@ -15,10 +15,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
-use coalesce_core::net::quic::{
+use chuanmen_core::net::quic::{
     human_bytes, summarize_plan, HostOptions, HostSession, Receiver, ReceiverOptions,
 };
-use coalesce_core::progress::{ProgressEvent, ProgressSender};
+use chuanmen_core::progress::{ProgressEvent, ProgressSender};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
@@ -95,12 +95,12 @@ struct AppState {
     /// 当前分享会话。取消 = 关掉它，`accept()` 立刻返回，循环退出。
     host: Mutex<Option<Arc<HostSession>>>,
     /// 正在进行的接收。取消后已下载的部分会保留，下次可以续传。
-    transfer: Mutex<Option<coalesce_core::CancelToken>>,
+    transfer: Mutex<Option<chuanmen_core::CancelToken>>,
 }
 
 /// 本机设备名：让对方在界面上知道连的是谁。
 fn device_name() -> String {
-    std::env::var("COA_DEVICE_NAME")
+    std::env::var("CHUAN_DEVICE_NAME")
         .ok()
         .or_else(|| std::env::var("COMPUTERNAME").ok())
         .or_else(|| std::env::var("HOSTNAME").ok())
@@ -202,7 +202,7 @@ async fn start_share(
     let path_bufs: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
 
     // 扫描 + 算哈希可能要几秒（大文件），界面要给出等待提示
-    let plan = coalesce_core::plan_paths(&path_bufs).map_err(|e| e.to_string())?;
+    let plan = chuanmen_core::plan_paths(&path_bufs).map_err(|e| e.to_string())?;
     let summary = summarize_plan(&plan);
     let file_count = plan.files.len();
     let total_bytes = plan.total_bytes;
@@ -309,8 +309,8 @@ async fn discover_hosts(
         .map(|payload| payload.sid);
 
     let timeout = std::time::Duration::from_secs(timeout_secs.unwrap_or(3).clamp(1, 10));
-    let cancel = coalesce_core::CancelToken::new();
-    let hosts = coalesce_core::discover(timeout, own_sid.as_deref(), &cancel)
+    let cancel = chuanmen_core::CancelToken::new();
+    let hosts = chuanmen_core::discover(timeout, own_sid.as_deref(), &cancel)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -341,13 +341,13 @@ async fn start_receive(
     payload: String,
     dest: String,
 ) -> Result<(), String> {
-    let payload = coalesce_core::QrPayload::decode(&payload).map_err(|e| e.to_string())?;
+    let payload = chuanmen_core::QrPayload::decode(&payload).map_err(|e| e.to_string())?;
     let dest_dir = PathBuf::from(dest);
 
     let progress = ProgressSender::new();
     spawn_forwarder(app.clone(), progress.subscribe());
 
-    let cancel = coalesce_core::CancelToken::new();
+    let cancel = chuanmen_core::CancelToken::new();
     *state.transfer.lock().unwrap() = Some(cancel.clone());
 
     let app_done = app.clone();
@@ -426,7 +426,7 @@ async fn pick_paths(app: AppHandle, kind: String) -> Result<Vec<String>, String>
 /// 排查建议一旦两处不一致，用户就会更困惑。
 #[tauri::command]
 async fn diagnose_payload(payload: String) -> Result<String, String> {
-    let d = coalesce_core::diag::diagnose_str(&payload)
+    let d = chuanmen_core::diag::diagnose_str(&payload)
         .await
         .map_err(|e| e.to_string())?;
     Ok(d.render())
@@ -457,7 +457,7 @@ fn cancel_share(state: State<'_, AppState>) {
 /// 比看到"正在连接"安心得多。
 #[tauri::command]
 fn inspect_payload(payload: String) -> Result<serde_json::Value, String> {
-    let p = coalesce_core::QrPayload::decode(&payload).map_err(|e| e.to_string())?;
+    let p = chuanmen_core::QrPayload::decode(&payload).map_err(|e| e.to_string())?;
     Ok(serde_json::json!({
         "host": p.name,
         "addresses": p.addrs.iter().map(|a| a.display()).collect::<Vec<_>>(),
@@ -482,5 +482,5 @@ fn main() {
             inspect_payload
         ])
         .run(tauri::generate_context!())
-        .expect("启动 Coalesce 失败");
+        .expect("启动 串门 失败");
 }

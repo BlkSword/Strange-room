@@ -32,7 +32,7 @@ use crate::error::{Error, Result};
 use crate::qr::{AddressHint, QrPayload};
 
 /// 服务类型。用 `_udp`：实际承载是 QUIC（跑在 UDP 上）。
-pub const SERVICE_TYPE: &str = "_coalesce._udp.local.";
+pub const SERVICE_TYPE: &str = "_chuanmen._udp.local.";
 
 /// TXT 里的协议版本。加它是为了将来能**安静地忽略**不认识的广播，
 /// 而不是把新版本的设备当成损坏数据。
@@ -47,7 +47,7 @@ pub const DEFAULT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(3);
 /// 用它而不是指纹原文，是因为**人眼比对**才是这里的用途：32 位十六进制没人会真去对，
 /// 6 位数字一眼就能看出不一样。分成两组三位是手机号式的习惯写法，读起来更快。
 pub fn verification_code(fingerprint: &str) -> String {
-    let h = blake3::hash(format!("coalesce-verify:{fingerprint}").as_bytes());
+    let h = blake3::hash(format!("chuanmen-verify:{fingerprint}").as_bytes());
     let b = h.as_bytes();
     let n = u32::from_be_bytes([b[0], b[1], b[2], b[3]]) % 1_000_000;
     format!("{:03} {:03}", n / 1000, n % 1000)
@@ -124,8 +124,8 @@ impl Advertisement {
 
         // 实例名必须**唯一**：会话 ID 天生唯一，用它就不会和同机的另一个实例顶掉。
         // 展示用的名字走 TXT 里的 name 字段，所以这里不需要"好读"。
-        let instance = format!("coa-{sid}");
-        let host_name = format!("coa-{}.local.", &sid[..sid.len().min(8)]);
+        let instance = format!("chuan-{sid}");
+        let host_name = format!("chuan-{}.local.", &sid[..sid.len().min(8)]);
 
         let mut props: HashMap<String, String> = HashMap::new();
         props.insert("v".to_string(), TXT_VERSION.to_string());
@@ -142,7 +142,7 @@ impl Advertisement {
         // 注意：**注册成功不等于对方一定搜得到**——组播可能被防火墙或 AP 隔离拦住，
         // 那是环境问题，检测不到也不该让分享失败（二维码路径照样能用）。
         // 所以这里不做"确认能被发现"的二次探测，真正的验证留给用户在真实网络上
-        // 用 `coa discover` 跑一次（见 README）。
+        // 用 `chuan discover` 跑一次（见 README）。
         daemon
             .register(info)
             .map_err(|e| Error::protocol(format!("注册 mDNS 广播失败：{e}")))?;

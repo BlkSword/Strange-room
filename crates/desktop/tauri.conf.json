@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Coalesce",
+  "productName": "串门",
   "version": "0.1.0",
-  "identifier": "com.blksword.coalesce",
+  "identifier": "com.blksword.chuanmen",
   "build": {
     "frontendDist": "ui"
   },
@@ -10,7 +10,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "Coalesce",
+        "title": "串门",
         "width": 560,
         "height": 720,
         "minWidth": 460,

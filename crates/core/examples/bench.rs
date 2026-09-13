@@ -12,8 +12,8 @@
 
 use std::time::Instant;
 
-use coalesce_core::net::quic::{HostOptions, HostSession, Receiver, ReceiverOptions};
-use coalesce_core::progress::ProgressSender;
+use chuanmen_core::net::quic::{HostOptions, HostSession, Receiver, ReceiverOptions};
+use chuanmen_core::progress::ProgressSender;
 
 fn human_mb_per_s(bytes: u64, secs: f64) -> f64 {
     if secs <= 0.0 {
@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(512);
 
-    let root = std::env::temp_dir().join(format!("coa-bench-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("chuan-bench-{}", std::process::id()));
     let src = root.join("src");
     let dst = root.join("dst");
     std::fs::create_dir_all(&src)?;
@@ -58,7 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── 阶段一：扫描与哈希（这一阶段不涉及网络，纯 CPU + 磁盘）──
     let t_plan = Instant::now();
-    let plan = coalesce_core::plan_paths(std::slice::from_ref(&file))?;
+    let plan = chuanmen_core::plan_paths(std::slice::from_ref(&file))?;
     let plan_secs = t_plan.elapsed().as_secs_f64();
     println!(
         "扫描 + BLAKE3 哈希：{plan_secs:.2}s  →  {:.0} MiB/s（单线程）",
@@ -74,11 +74,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         once: true,
     })
     .await?;
-    let payload = coalesce_core::QrPayload::new(
+    let payload = chuanmen_core::QrPayload::new(
         session.session_id.clone(),
         session.device_name().to_string(),
         session.fingerprint().to_string(),
-        vec![coalesce_core::AddressHint {
+        vec![chuanmen_core::AddressHint {
             host: "127.0.0.1".into(),
             port: session.port(),
         }],
@@ -95,7 +95,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             dest_dir: dst.clone(),
             device_name: "bench-recv".into(),
             continue_partial: true,
-            cancel: coalesce_core::CancelToken::new(),
+            cancel: chuanmen_core::CancelToken::new(),
         },
         &progress,
     )
