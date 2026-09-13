@@ -16,6 +16,7 @@
 
 pub mod bytes;
 pub mod diag;
+pub mod discovery;
 pub mod cancel;
 pub mod error;
 pub mod fs_util;
@@ -28,6 +29,7 @@ pub mod transfer;
 
 pub use cancel::CancelToken;
 pub use diag::{Diagnosis, ProbeOutcome, ProbeReport, Verdict};
+pub use discovery::{discover, verification_code, Advertisement, NearbyHost};
 pub use error::{Error, Result};
 pub use progress::{ProgressEvent, ProgressSender};
 pub use qr::{AddressHint, QrPayload};

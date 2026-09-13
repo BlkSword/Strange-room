@@ -130,7 +130,7 @@ fn host_part(addr: &str) -> &str {
 /// 用 /16 而不是 /24：家庭网络多是 /24，但企业网里 10.x 常用 /16 甚至 /8，
 /// 用 /24 会把"同网段"误判成"不同网段"，那是最糟的错误方向——把人引去查
 /// 错误的 WiFi。宁可漏判，也不要误判。
-fn looks_same_subnet(local: IpAddr, host: &str) -> Option<bool> {
+pub(crate) fn looks_same_subnet(local: IpAddr, host: &str) -> Option<bool> {
     let host_ip: IpAddr = host_part(host).parse().ok()?;
     match (local, host_ip) {
         (IpAddr::V4(a), IpAddr::V4(b)) => {

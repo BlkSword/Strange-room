@@ -11,8 +11,10 @@
 
 mod render;
 
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -59,10 +61,10 @@ enum Command {
         no_qr: bool,
     },
 
-    /// 接收文件：扫码得到连接串后，粘贴进来开始接收
+    /// 接收文件：带上连接串就直接连，不带就先列出附近正在分享的设备让你挑
     Receive {
-        /// 二维码里的连接串（srx1: 开头），由主机提供
-        payload: String,
+        /// 二维码/连接串（srx1: 开头）。省略时自动搜索同一 WiFi 下正在分享的设备
+        payload: Option<String>,
 
         /// 保存到哪个目录
         #[arg(long, short = 't', default_value = ".")]
@@ -75,6 +77,13 @@ enum Command {
         /// 不续传：忽略已有进度，从头开始
         #[arg(long, default_value_t = false)]
         no_resume: bool,
+    },
+
+    /// 看看附近有谁在分享（排查发现不到设备时用它；5 秒内出结果）
+    Discover {
+        /// 搜索多少秒。mDNS 的查询是退避重发的，太短会漏设备
+        #[arg(long, default_value_t = 3)]
+        timeout: u64,
     },
 
     /// 网络自检：连不上时用它判断问题出在哪（只发握手，不传输任何文件）
@@ -132,6 +141,7 @@ async fn run(cli: Cli) -> Result<()> {
             name,
             no_resume,
         } => receive(payload, to, name, no_resume).await,
+        Command::Discover { timeout } => discover(timeout).await,
         Command::Diagnose { payload } => diagnose(payload).await,
     }
 }
@@ -167,6 +177,32 @@ async fn send(
 
     render::print_banner(session.device_name(), &summary, session.port());
     render::print_qr(&encoded, no_qr);
+
+    // 广播到局域网：同一 WiFi 下的人运行 sr receive 就能直接看到这台设备，不用扫码。
+    // 广播不出去不算致命（二维码/连接串照样能用），所以只提示、不中断。
+    // 返回的守卫必须在整个分享期间活着：drop 就等于撤销广播。
+    let _advertisement = match sr_core::discovery::Advertisement::start(
+        session.device_name(),
+        &payload.sid,
+        &payload.fp,
+        session.port(),
+        &payload.addrs,
+    ) {
+        Ok(ad) => {
+            println!(
+                "
+已广播到局域网：对方运行 sr receive 就能看到「{}」（验证码 {}，两边应当一致）",
+                session.device_name(),
+                sr_core::discovery::verification_code(&payload.fp)
+            );
+            Some(ad)
+        }
+        Err(e) => {
+            println!("
+（没能广播出去：{e}。不影响使用——让对方扫码或用连接串。）");
+            None
+        }
+    };
 
     println!("\n等待对方接收……（在此终端按 Ctrl+C 可停止）");
 
@@ -233,13 +269,104 @@ async fn diagnose(payload: String) -> Result<()> {
     Ok(())
 }
 
+/// 看看附近有谁在分享。
+///
+/// 这既是功能，也是**排查工具**：mDNS 在真实网络里失效的方式太多（AP 隔离、
+/// 禁组播、防火墙），与其猜，不如让它 5 秒给个明确结果。
+async fn discover(timeout_secs: u64) -> Result<()> {
+    let timeout = Duration::from_secs(timeout_secs.max(1));
+    println!("正在搜索附近正在分享的设备（{} 秒）……", timeout.as_secs());
+
+    let cancel = sr_core::CancelToken::new();
+    let hosts = sr_core::discover(timeout, None, &cancel)
+        .await
+        .context("搜索附近设备失败")?;
+
+    if hosts.is_empty() {
+        // 找不到时给出的必须是"下一步做什么"，而不是一句"没找到"
+        println!("附近没有找到正在分享的设备。");
+        println!("mDNS 需要同时满足三条：两台设备在同一网段、网络允许组播、防火墙放行 UDP 5353。");
+        println!("访客 WiFi 的 AP 隔离、部分企业网络、以及开着 VPN 时都会破坏其中一条。");
+        println!("本机若有别的程序占着 UDP 5353（抓包工具、某些 VPN 客户端）也会导致搜不到。");
+        println!("这些情况下请让对方把连接串发给你，用 `sr receive <连接串>` 接收。");
+        anyhow::bail!("没有发现任何设备");
+    }
+
+    println!("找到 {} 台：", hosts.len());
+    for host in &hosts {
+        println!("  {}", host.display_line());
+    }
+    println!();
+    println!("提示：验证码应当和对方屏幕上显示的一致；对不上就不要连。");
+    Ok(())
+}
+
+/// 扫描附近设备并让用户挑一台（用于 `sr receive` 不带连接串的情况）。
+///
+/// 交互约定刻意做成"能自动就自动"：只找到一台就直接用——那是最常见的场景，
+/// 没必要让人多按一次回车；找到多台才让人输序号。这样脚本里 `sr receive` 在
+/// 只有一台设备时也能直接用，而多台时会明确报错，绝不"猜一个"然后传错机器。
+async fn pick_nearby_host() -> Result<sr_core::NearbyHost> {
+    let timeout = sr_core::discovery::DEFAULT_DISCOVERY_TIMEOUT;
+    println!("正在搜索同一 WiFi 下正在分享的设备（{} 秒）……", timeout.as_secs());
+
+    let cancel = sr_core::CancelToken::new();
+    let hosts = sr_core::discover(timeout, None, &cancel)
+        .await
+        .context("搜索附近设备失败")?;
+
+    if hosts.is_empty() {
+        println!("没有找到正在分享的设备。可以检查：");
+        println!("  · 两台设备是否连的是同一个网络（访客网络常开了 AP 隔离）");
+        println!("  · 对方是否还在分享状态（`sr send` 关掉就不再广播）");
+        println!("  · 防火墙是否放行 UDP 5353（mDNS）；本机有没有别的程序占着这个端口");
+        println!("仍然不行时，让对方把连接串发给你，用 `sr receive <连接串>` 接收。");
+        anyhow::bail!("没有找到正在分享的设备");
+    }
+
+    if hosts.len() == 1 {
+        let host = hosts.into_iter().next().expect("已经判断过长度为 1");
+        println!("找到一台：{}", host.display_line());
+        return Ok(host);
+    }
+
+    println!("找到 {} 台设备：", hosts.len());
+    for (i, host) in hosts.iter().enumerate() {
+        println!("  {}) {}", i + 1, host.display_line());
+    }
+    print!("\n输入要连接的序号（直接回车取消）：");
+    io::stdout().flush().ok();
+
+    let mut line = String::new();
+    io::stdin().read_line(&mut line).context("读取输入失败")?;
+    let choice: usize = line
+        .trim()
+        .parse()
+        .map_err(|_| anyhow::anyhow!("没有选择设备（需要输入序号）"))?;
+    if choice == 0 {
+        anyhow::bail!("序号从 1 开始");
+    }
+    hosts
+        .into_iter()
+        .nth(choice - 1)
+        .ok_or_else(|| anyhow::anyhow!("没有第 {choice} 台设备"))
+}
+
 async fn receive(
-    payload: String,
+    payload: Option<String>,
     to: PathBuf,
     name: Option<String>,
     no_resume: bool,
 ) -> Result<()> {
     let name = name.unwrap_or_else(device_name);
+
+    // 没给连接串就走「发现」这条路：这是整个产品里最接近零准备的一步
+    // （对方只要运行 sr receive，不用扫码、不用手输任何东西）。
+    let payload = match payload {
+        Some(p) => p,
+        None => pick_nearby_host().await?.payload().encode()?,
+    };
+
     let payload = sr_core::QrPayload::decode(&payload)
         .context("解析连接串失败")?;
 
