@@ -307,6 +307,23 @@ button.ghost:hover { background: var(--bg-sunken); color: var(--ink); }
 #result-body { white-space: pre-wrap; line-height: 1.75; }
 
 /* 结果面板：垂直居中，图标在上、说明在下 */
+/* 收到的文本：等宽 + 可选中。用户下一步几乎一定是复制去粘贴。 */
+.text-body {
+  margin: 8px 0;
+  padding: 10px 12px;
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, Consolas, "Courier New", monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  user-select: text;
+}
+
 .result-panel {
   flex: 1;
   display: flex; flex-direction: column; justify-content: center;

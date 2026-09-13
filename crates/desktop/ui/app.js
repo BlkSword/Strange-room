@@ -222,6 +222,8 @@ let lastDone = 0;
 let lastAt = 0;
 
 function showTransfer() {
+  receivedTexts = [];
+  renderTexts();
   $("cur-file").textContent = "";
   $("file-bar").style.width = "0%";
   $("overall-bar").style.width = "0%";
@@ -233,6 +235,42 @@ function showTransfer() {
   if (cancelBtn) { cancelBtn.disabled = false; cancelBtn.textContent = "停止接收"; }
   startedAt = Date.now();
   show("screen-transfer");
+}
+
+// 收到的文本：不落盘，攒起来在结果页显示，并提供复制按钮。
+// 用 textContent 渲染——内容来自网络，必须当不可信内容处理。
+let receivedTexts = [];
+
+function renderTexts() {
+  const box = $("texts");
+  if (!box) return;
+  box.innerHTML = "";
+  if (!receivedTexts.length) { box.style.display = "none"; return; }
+  box.style.display = "";
+  receivedTexts.forEach(({ label, text }) => {
+    const card = document.createElement("div");
+    card.className = "card";
+    const title = document.createElement("div");
+    title.className = "note";
+    title.textContent = `收到文本 · ${label}`;
+    const body = document.createElement("pre");
+    body.className = "text-body";
+    body.textContent = text;
+    const copy = document.createElement("button");
+    copy.textContent = "复制";
+    copy.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(text);
+        copy.textContent = "已复制";
+      } catch (err) {
+        copy.textContent = "复制失败，请手动选中";
+      }
+    };
+    card.appendChild(title);
+    card.appendChild(body);
+    card.appendChild(copy);
+    box.appendChild(card);
+  });
 }
 
 // kind：ok（成功）/ fail（失败）/ stop（用户主动停止）/ info（信息，如自检报告）
@@ -297,10 +335,15 @@ if (listen) {
         break;
       }
       case "done":
+        // 文本单独说：说"0 个文件"再配一句"传输完成"会让人以为出了什么问题
         showResult(
           "传输完成",
-          `${e.files} 个文件，共 ${e.humanBytes}`,
-          "",
+          e.files === 0 && e.texts > 0
+            ? `${e.texts} 段文本，共 ${e.humanBytes}`
+            : e.texts > 0
+            ? `${e.files} 个文件 + ${e.texts} 段文本，共 ${e.humanBytes}`
+            : `${e.files} 个文件，共 ${e.humanBytes}`,
+          e.files === 0 && e.texts > 0 ? "文本已显示在下方，可直接复制。" : "",
           "ok"
         );
         break;
@@ -324,6 +367,10 @@ if (listen) {
         }
         break;
       }
+      case "textReceived":
+        receivedTexts.push({ label: e.label, text: e.text });
+        renderTexts();
+        break;
       case "warn":
         $("peer").textContent += ` · ${e.message}`;
         break;

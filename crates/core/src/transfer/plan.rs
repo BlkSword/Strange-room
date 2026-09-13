@@ -12,9 +12,24 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 use crate::fs_util;
 
-/// 清单里的一个文件。
+/// 条目种类。平台化的第一步：房间里的东西不只有文件。
+///
+/// 文本条目**刻意复用文件那一整套**（有 size、有 BLAKE3、一样分块传），
+/// 所以传输、校验、进度这些代码一行都不用改——区别只有两处：
+/// 来源在内存而不是磁盘，落点在界面而不是目录。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ItemKind {
+    #[default]
+    File,
+    /// 一段文本或链接（"贴纸"）
+    Text,
+}
+
+/// 清单里的一个条目（文件或文本）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PlannedFile {
+
     /// 稳定 ID：由相对路径推导，保证接收端重连后仍能对上同一个文件。
     pub file_id: String,
     /// 相对路径（相对用户选中的根），用 `/` 分隔
@@ -24,7 +39,14 @@ pub struct PlannedFile {
     pub size: u64,
     /// BLAKE3 hex
     pub blake3: String,
+    /// 条目种类。旧清单里没有这个字段，反序列化时按"文件"处理。
+    #[serde(default)]
+    pub kind: ItemKind,
+    /// 文本条目的内容（只存在于发送端内存，不上网也不落盘）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
 }
+
 
 #[derive(Debug, Clone, Default)]
 pub struct TransferPlan {
@@ -40,7 +62,54 @@ impl TransferPlan {
     }
 }
 
+/// 一次最多能发的文本大小。
+///
+/// 刻意限制得比较小：文本走的是"贴纸"那条路，不是用来传文件的。
+/// 真要发大段内容，用户应该发文件——那样才有落盘和续传。
+pub const MAX_TEXT_BYTES: usize = 64 * 1024;
+
+/// 造一份"只包含一段文本"的清单。
+///
+/// `label` 是接收端看到的来源说明（例如"来自 小黑的剪贴板"）。
+pub fn plan_text(label: &str, content: &str) -> Result<TransferPlan> {
+    let bytes = content.as_bytes();
+    if bytes.len() > MAX_TEXT_BYTES {
+        return Err(Error::protocol(format!(
+            "文本太长了（{} 字节，上限 {}）——大段内容请当作文件发送",
+            bytes.len(),
+            MAX_TEXT_BYTES
+        )));
+    }
+    let label = label.trim();
+    let label = if label.is_empty() { "一段文本" } else { label };
+    Ok(TransferPlan {
+        files: vec![PlannedFile {
+            // 用内容派生 ID：同样的文本得到同样的 ID，重发不会让接收端困惑
+            file_id: file_id_for(&format!("text:{label}:{content}")),
+            relative_path: label.to_string(),
+            source_path: PathBuf::new(),
+            size: bytes.len() as u64,
+            blake3: hex::encode(blake3::hash(bytes).as_bytes()),
+            kind: ItemKind::Text,
+            text: Some(content.to_string()),
+        }],
+        root_name: String::new(),
+        total_bytes: bytes.len() as u64,
+    })
+}
+
+/// 把文本条目接到一份已有的文件清单后面（房间里既能放文件也能贴文本）。
+pub fn append_text(plan: &mut TransferPlan, label: &str, content: &str) -> Result<()> {
+    let mut extra = plan_text(label, content)?;
+    if let Some(item) = extra.files.pop() {
+        plan.total_bytes += item.size;
+        plan.files.push(item);
+    }
+    Ok(())
+}
+
 /// 由相对路径生成稳定 file_id。
+
 ///
 /// 用 BLAKE3 而不是随机 UUID：接收端重连、或用户重传同一批文件时，
 /// ID 保持一致，续传状态才能被正确匹配上。
@@ -128,6 +197,8 @@ fn add_file(plan: &mut TransferPlan, base: &Path, path: &Path) -> Result<()> {
         source_path: path.to_path_buf(),
         size,
         blake3: hex::encode(hash.as_bytes()),
+        kind: ItemKind::File,
+        text: None,
     });
     Ok(())
 }
@@ -141,6 +212,57 @@ mod tests {
         let d = std::env::temp_dir().join(format!("coa-plan-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn plan_text_carries_content_hash_and_kind() {
+        let plan = plan_text("一个链接", "https://example.com/a?b=1").unwrap();
+        assert_eq!(plan.files.len(), 1);
+        assert_eq!(plan.total_bytes, "https://example.com/a?b=1".len() as u64);
+
+        let item = &plan.files[0];
+        assert_eq!(item.kind, ItemKind::Text, "文本条目必须带上种类");
+        assert_eq!(item.text.as_deref(), Some("https://example.com/a?b=1"));
+        assert_eq!(
+            item.blake3,
+            hex::encode(blake3::hash(b"https://example.com/a?b=1").as_bytes()),
+            "文本也要有 BLAKE3——接收端靠它校验"
+        );
+        // 同样的内容得到同样的 ID：重发不会让接收端以为是另一个东西
+        let again = plan_text("一个链接", "https://example.com/a?b=1").unwrap();
+        assert_eq!(again.files[0].file_id, item.file_id);
+
+        // 空标签有兜底，不然接收端会看到一片空白
+        let unnamed = plan_text("   ", "x").unwrap();
+        assert_eq!(unnamed.files[0].relative_path, "一段文本");
+    }
+
+    #[test]
+    fn plan_text_refuses_oversized_text() {
+        let big = "x".repeat(MAX_TEXT_BYTES + 1);
+        let err = plan_text("太大", &big).expect_err("超过上限必须拒绝");
+        assert!(
+            err.to_string().contains("文本太长"),
+            "错误信息要说清原因：{err}"
+        );
+    }
+
+    #[test]
+    fn append_text_keeps_files_and_updates_total() {
+        let dir = tmpdir();
+        let file = dir.join("a.bin");
+        fs::write(&file, b"hello").unwrap();
+
+        let mut plan = plan_paths(&[file]).unwrap();
+        let before = plan.total_bytes;
+        append_text(&mut plan, "一段文本", "贴一段字").unwrap();
+
+        assert_eq!(plan.files.len(), 2);
+        assert_eq!(plan.files[0].kind, ItemKind::File);
+        assert_eq!(plan.files[1].kind, ItemKind::Text);
+        assert_eq!(plan.total_bytes, before + "贴一段字".len() as u64, "总字节数要算上文本");
+
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -70,8 +70,16 @@ enum UiEvent {
     },
     Done {
         files: usize,
+        /// 收到的文本段数（不落盘，界面单独显示）
+        texts: usize,
         bytes: u64,
         human_bytes: String,
+    },
+    /// 收到一段文本（平台化第一级）。它不是文件：界面把它当"贴纸"显示，
+    /// 并提供一个复制按钮——用户的下一步动作几乎一定是"粘贴到别处"。
+    TextReceived {
+        label: String,
+        text: String,
     },
     /// message 是给用户看的，必须可操作
     Failed {
@@ -167,11 +175,13 @@ fn spawn_forwarder(app: AppHandle, mut rx: tokio::sync::broadcast::Receiver<Prog
                 ProgressEvent::FileFinished { relative_path, .. } => {
                     UiEvent::FileFinished { path: relative_path }
                 }
-                ProgressEvent::SessionFinished { files, bytes } => UiEvent::Done {
+                ProgressEvent::SessionFinished { files, texts, bytes } => UiEvent::Done {
                     files,
+                    texts,
                     bytes,
                     human_bytes: human_bytes(bytes),
                 },
+                ProgressEvent::TextReceived { label, text } => UiEvent::TextReceived { label, text },
                 ProgressEvent::Warn(message) => UiEvent::Warn { message },
             };
             let _ = app.emit(EVT, ui);
@@ -228,6 +238,7 @@ async fn start_share(
                         EVT,
                         UiEvent::Done {
                             files: s.files_sent,
+                            texts: s.texts.len(),
                             bytes: s.bytes_sent,
                             human_bytes: human_bytes(s.bytes_sent),
                         },
@@ -356,6 +367,7 @@ async fn start_receive(
         let ui = match result {
             Ok(s) => UiEvent::Done {
                 files: s.files_sent,
+                texts: s.texts.len(),
                 bytes: s.bytes_sent,
                 human_bytes: human_bytes(s.bytes_sent),
             },

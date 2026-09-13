@@ -40,9 +40,13 @@ struct Cli {
 enum Command {
     /// 分享文件：屏幕出现二维码，同时向局域网广播（对方扫码、直接发现、或从引导页下载客户端都行）
     Send {
-        /// 要分享的文件或目录（可以多个）
-        #[arg(required = true, num_args = 1..)]
-        paths: Vec<PathBuf>,
+    /// 要分享的文件或目录（可以多个）
+    #[arg(required_unless_present = "text", num_args = 0..)]
+    paths: Vec<PathBuf>,
+
+    /// 发一段文本/链接（和路径可以一起用）
+    #[arg(long)]
+    text: Option<String>,
 
         /// 监听端口。默认随机分配一个空闲端口
         #[arg(long, default_value_t = 0)]
@@ -141,7 +145,8 @@ async fn run(cli: Cli) -> Result<()> {
             name,
             once,
             no_qr,
-        } => send(paths, port, name, once, no_qr).await,
+            text,
+        } => send(paths, port, name, once, no_qr, text).await,
         Command::Receive {
             payload,
             to,
@@ -159,11 +164,30 @@ async fn send(
     name: Option<String>,
     once: bool,
     no_qr: bool,
+    text: Option<String>,
 ) -> Result<()> {
     let name = name.unwrap_or_else(device_name);
 
-    println!("正在扫描文件并计算校验和……（大文件需要一点时间，但只需算一次）");
-    let plan = coalesce_core::plan_paths(&paths).context("展开待发送文件失败")?;
+    // 清单：文件走路径展开，文本直接在内存里。
+    // 两者可以混用——房间里既能放文件也能贴一段字。
+    let mut plan = if paths.is_empty() {
+        coalesce_core::TransferPlan::default()
+    } else {
+        println!("正在扫描文件并计算校验和……（大文件需要一点时间，但只需算一次）");
+        coalesce_core::plan_paths(&paths).context("展开待发送文件失败")?
+    };
+    if let Some(text) = &text {
+        // 给人看的来源说明：链接和普通文本分开说，接收端一眼就知道拿到的是什么
+        let label = if looks_like_link(text) {
+            "一个链接"
+        } else {
+            "一段文本"
+        };
+        coalesce_core::transfer::plan::append_text(&mut plan, label, text)?;
+    }
+    if plan.files.is_empty() {
+        anyhow::bail!("没有要发送的内容：给一个路径，或者用 --text 发一段文字");
+    }
     coalesce_core::net::quic::validate_plan_paths(&plan)?;
 
     let summary = coalesce_core::net::quic::summarize_plan(&plan);
@@ -294,6 +318,12 @@ async fn diagnose(payload: String) -> Result<()> {
     let d = coalesce_core::diag::diagnose_str(&payload).await.context("自检失败")?;
     print!("{}", d.render());
     Ok(())
+}
+
+/// 粗判一段文本是不是链接（只影响显示用的来源说明，判断错了也不影响传输）。
+fn looks_like_link(text: &str) -> bool {
+    let t = text.trim_start();
+    t.starts_with("http://") || t.starts_with("https://") || t.starts_with("www.")
 }
 
 /// 看看附近有谁在分享。
@@ -438,12 +468,24 @@ async fn receive(
 
     match result {
         Ok(s) => {
-            println!(
-                "\n接收完成：成功 {} 个文件，共 {}",
-                s.files_sent,
-                coalesce_core::net::quic::human_bytes(s.bytes_sent)
-            );
-            println!("文件已保存到：{}", dest.display());
+            // 摘要要分得清"文件"和"文本"：说"成功 0 个文件"再补一句"文件已保存到"
+            // 会让人以为收到了个空文件。文本的落点在终端，不在磁盘。
+            let human = coalesce_core::net::quic::human_bytes(s.bytes_sent);
+            if s.files_sent == 0 && !s.texts.is_empty() {
+                println!("\n接收完成：{} 段文本，共 {human}", s.texts.len());
+                println!("文本已在上方显示（没有写入磁盘）。");
+            } else if s.texts.is_empty() {
+                println!("\n接收完成：成功 {} 个文件，共 {human}", s.files_sent);
+                println!("文件已保存到：{}", dest.display());
+            } else {
+                println!(
+                    "\n接收完成：成功 {} 个文件 + {} 段文本，共 {human}",
+                    s.files_sent,
+                    s.texts.len()
+                );
+                println!("文件已保存到：{}", dest.display());
+                println!("文本已在上方显示（没有写入磁盘）。");
+            }
             if !s.failures.is_empty() {
                 println!("有 {} 个文件失败（其他文件不受影响）：", s.failures.len());
                 for (p, e) in &s.failures {

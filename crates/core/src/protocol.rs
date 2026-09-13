@@ -136,14 +136,19 @@ pub struct ServerHello {
     pub max_chunk_size: u32,
 }
 
-/// 主机端共享的文件清单条目。
+/// 主机端共享的清单条目（文件或文本）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FileEntry {
     pub file_id: String,
+    /// 文件是相对路径；文本是给人看的来源说明（例如"来自 小黑的剪贴板"）
     pub relative_path: String,
     pub size: u64,
     pub blake3: String,
+    /// 条目种类。旧版本发的清单没有这个字段，按"文件"处理。
+    #[serde(default)]
+    pub kind: crate::transfer::plan::ItemKind,
 }
+
 
 /// 清单：跟在 ServerHello 之后发送，让接收端先拿到全貌。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -203,6 +208,15 @@ mod tests {
     use super::*;
     use tokio::io::duplex;
 
+    #[test]
+    fn file_entry_without_kind_is_treated_as_a_file() {
+        // 旧版本发来的清单里没有 kind 字段（那时只有文件）。
+        // 这必须被当成文件、而不是报错——向前兼容是"房间里能混着放东西"的前提。
+        let json = r#"{"file_id":"a1","relative_path":"a.bin","size":3,"blake3":"00ff"}"#;
+        let entry: FileEntry = serde_json::from_str(json).expect("应当能解析旧清单");
+        assert_eq!(entry.kind, crate::transfer::plan::ItemKind::File);
+    }
+
     #[tokio::test]
     async fn frame_roundtrip_over_stream() {
         let (mut a, mut b) = duplex(64 * 1024);
@@ -257,6 +271,7 @@ mod tests {
                     relative_path: format!("dir{}/file-{i}.bin", i % 20),
                     size: 1024 * 1024,
                     blake3: "ab".repeat(32),
+                    kind: crate::transfer::plan::ItemKind::File,
                 })
                 .collect(),
             total_bytes: 500 * 1024 * 1024,

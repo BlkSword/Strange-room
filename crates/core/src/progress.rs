@@ -31,8 +31,17 @@ pub enum ProgressEvent {
         relative_path: String,
     },
     /// 会话结束
-    SessionFinished { files: usize, bytes: u64 },
+    /// files 只数文件；文本单独计数——两者对用户是两件事
+    SessionFinished {
+        files: usize,
+        texts: usize,
+        bytes: u64,
+    },
     /// 非致命问题（单个文件失败但会话继续）
+    /// 收到一段文本（平台化的第一级：房间里不只有文件）。
+    /// 界面上它是一条"贴纸"，不是磁盘上的文件。
+    TextReceived { label: String, text: String },
+
     Warn(String),
 }
 
@@ -123,6 +132,7 @@ mod tests {
         let mut rx = sender.subscribe();
         sender.send(ProgressEvent::SessionFinished {
             files: 1,
+            texts: 0,
             bytes: 10,
         });
         let got = rx.recv().await.unwrap();
@@ -130,6 +140,7 @@ mod tests {
             got,
             ProgressEvent::SessionFinished {
                 files: 1,
+                texts: 0,
                 bytes: 10
             }
         );

@@ -65,6 +65,67 @@ fn spawn_host_task(session: HostSession) -> tokio::task::JoinHandle<coalesce_cor
 
 // ==================== 测试 ====================
 
+/// 文本条目：和文件走同一套传输，但**不落盘**。
+///
+/// 这条守的是"房间里不只有文件"这件事：文本必须完整到达（内容经 BLAKE3 校验），
+/// 而且不能变成磁盘上的文件——它是贴纸，不是文件。
+#[tokio::test(flavor = "multi_thread")]
+async fn transfers_a_text_item_alongside_a_file() {
+    common::isolated_env();
+    let (_src_guard, src) = tmp();
+    let (_dst_guard, dst) = tmp();
+
+    let data = pseudo_random(200_000, 5150);
+    let file = src.join("payload.bin");
+    write_file(&file, &data);
+
+    // 一次同时发：一个文件 + 一段文本（链接）
+    let mut plan = plan_paths(&[file]).unwrap();
+    let text = "https://example.com/一个链接?带参数=1\n第二行：中文也要原样到达";
+    coalesce_core::transfer::plan::append_text(&mut plan, "一个链接", text).unwrap();
+    assert_eq!(plan.files.len(), 2, "清单里应当有一个文件 + 一段文本");
+
+    let session = start_host(plan).await;
+    let payload = local_payload(&session);
+    let host = spawn_host_task(session);
+
+    let summary = Receiver::run(
+        ReceiverOptions {
+            payload,
+            dest_dir: dst.clone(),
+            device_name: "测试接收端".to_string(),
+            continue_partial: true,
+            cancel: coalesce_core::CancelToken::new(),
+        },
+        &ProgressSender::new(),
+    )
+    .await
+    .expect("接收失败");
+
+    assert!(summary.failures.is_empty(), "{:?}", summary.failures);
+    assert_eq!(summary.files_sent, 1, "文件算一个");
+    assert_eq!(summary.texts.len(), 1, "文本单独记账");
+    assert_eq!(summary.texts[0].0, "一个链接", "来源说明要传过来");
+    assert_eq!(summary.texts[0].1, text, "文本内容必须逐字节一致");
+
+    // 文件正常落盘
+    assert_eq!(std::fs::read(dst.join("payload.bin")).unwrap(), data);
+
+    // 文本不该在磁盘上留下任何东西——这是"贴纸"和"文件"的分界线
+    let mut entries: Vec<String> = std::fs::read_dir(&dst)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    entries.sort();
+    assert_eq!(
+        entries,
+        vec!["payload.bin".to_string()],
+        "文本不该变成文件：{entries:?}"
+    );
+
+    host.await.unwrap().unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn transfers_a_single_file_and_verifies_hash() {
     common::isolated_env();

@@ -160,7 +160,7 @@ fn render_loop(mut rx: tokio::sync::broadcast::Receiver<ProgressEvent>, role: Ro
                 model = ProgressModel::default();
                 started = Instant::now();
                 multi.suspend(|| {
-                    println!("已连接到 {peer}，开始{} {total_files} 个文件", role.verb())
+                    println!("已连接到 {peer}，开始{}（{total_files} 项）", role.verb())
                 });
                 overall.set_length(tb);
             }
@@ -215,18 +215,28 @@ fn render_loop(mut rx: tokio::sync::broadcast::Receiver<ProgressEvent>, role: Ro
                     bar.finish_and_clear();
                 }
             }
-            ProgressEvent::SessionFinished { files, bytes } => {
+            ProgressEvent::SessionFinished { files, texts, bytes } => {
                 overall.set_position(bytes);
                 overall.finish_and_clear();
                 let secs = started.elapsed().as_secs_f64();
                 let rate = if secs > 0.0 { bytes as f64 / secs } else { 0.0 };
                 multi.suspend(|| {
                     println!(
-                        "完成 {files} 个文件，{}，用时 {:.1}s（平均 {}/s）",
+                        "完成 {files} 个文件 + {texts} 段文本，{}，用时 {:.1}s（平均 {}/s）",
                         human(bytes),
                         secs,
                         human(rate as u64)
                     )
+                });
+            }
+            ProgressEvent::TextReceived { label, text } => {
+                // 文本不进磁盘：内容直接打到终端，用分隔线框起来方便整段复制。
+                // 用 suspend 是为了不和进度条互相冲掉。
+                multi.suspend(|| {
+                    println!();
+                    println!("── 收到文本（{label}）────────────────────────");
+                    println!("{text}");
+                    println!("──────────────────────────────────────────────");
                 });
             }
             ProgressEvent::Warn(msg) => {

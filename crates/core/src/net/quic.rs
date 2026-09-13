@@ -22,7 +22,7 @@ use crate::fs_util;
 use crate::progress::{ProgressEvent, ProgressSender};
 use crate::protocol::*;
 use crate::qr::{AddressHint, QrPayload};
-use crate::transfer::plan::TransferPlan;
+use crate::transfer::plan::{ItemKind, TransferPlan};
 use crate::transfer::resume::{PartialFile, ResumeState, RESUME_FILE};
 
 use super::tls;
@@ -251,7 +251,11 @@ impl HostSession {
 
 #[derive(Debug, Default, Clone)]
 pub struct TransferSummary {
+    /// 成功传完的文件数
     pub files_sent: usize,
+    /// 收到/发出的文本条目：（来源说明，内容）。
+    /// 只在接收端填充——文本的落点在界面，不在磁盘上。
+    pub texts: Vec<(String, String)>,
     pub bytes_sent: u64,
     pub failures: Vec<(String, String)>,
 }
@@ -328,6 +332,7 @@ async fn serve_connection(
             relative_path: f.relative_path.clone(),
             size: f.size,
             blake3: f.blake3.clone(),
+            kind: f.kind,
         })
         .collect();
     let manifest = FileManifest {
@@ -425,8 +430,12 @@ async fn serve_connection(
     .await;
     let _ = send.finish();
 
+    // 文本条目单独计数：界面上"0 个文件"和"1 段文本"是两件事
+    let texts = summary.texts.len();
+
     progress.send(ProgressEvent::SessionFinished {
         files: summary.files_sent,
+        texts,
         bytes: summary.bytes_sent,
     });
 
@@ -498,33 +507,50 @@ async fn send_one_file(
         offer.chunk_size
     } as usize;
 
-    let mut file = tokio::fs::File::open(&planned.source_path)
-        .await
-        .map_err(|e| Error::io(&planned.source_path, e))?;
-    if start_offset > 0 {
-        file.seek(std::io::SeekFrom::Start(start_offset))
-            .await
-            .map_err(|e| Error::io(&planned.source_path, e))?;
-    }
-
-    // 发送数据块。`chunk` 复用，避免每块都分配。
+    // 数据来源：文件从磁盘读，文本直接在内存里。
+    // 其余部分（分块、进度、结束帧、校验）完全一样——这就是"复用文件那套"的意思。
     let mut buf = vec![0u8; chunk_size];
     let mut sent = start_offset;
-    loop {
-        let n = file
-            .read(&mut buf)
-            .await
-            .map_err(|e| Error::io(&planned.source_path, e))?;
-        if n == 0 {
-            break;
+    match planned.kind {
+        ItemKind::Text => {
+            let text = planned.text.as_deref().unwrap_or_default().as_bytes();
+            let from = (start_offset as usize).min(text.len());
+            for part in text[from..].chunks(chunk_size) {
+                write_frame(send, &Frame::new(KIND_DATA, part.to_vec())).await?;
+                sent += part.len() as u64;
+                progress.send(ProgressEvent::ChunkProgress {
+                    file_id: planned.file_id.clone(),
+                    bytes_done: sent,
+                    bytes_total: planned.size,
+                });
+            }
         }
-        write_frame(send, &Frame::new(KIND_DATA, buf[..n].to_vec())).await?;
-        sent += n as u64;
-        progress.send(ProgressEvent::ChunkProgress {
-            file_id: planned.file_id.clone(),
-            bytes_done: sent,
-            bytes_total: planned.size,
-        });
+        ItemKind::File => {
+            let mut file = tokio::fs::File::open(&planned.source_path)
+                .await
+                .map_err(|e| Error::io(&planned.source_path, e))?;
+            if start_offset > 0 {
+                file.seek(std::io::SeekFrom::Start(start_offset))
+                    .await
+                    .map_err(|e| Error::io(&planned.source_path, e))?;
+            }
+            loop {
+                let n = file
+                    .read(&mut buf)
+                    .await
+                    .map_err(|e| Error::io(&planned.source_path, e))?;
+                if n == 0 {
+                    break;
+                }
+                write_frame(send, &Frame::new(KIND_DATA, buf[..n].to_vec())).await?;
+                sent += n as u64;
+                progress.send(ProgressEvent::ChunkProgress {
+                    file_id: planned.file_id.clone(),
+                    bytes_done: sent,
+                    bytes_total: planned.size,
+                });
+            }
+        }
     }
 
     // 结束时告知对端哈希，接收端据此校验
@@ -826,6 +852,72 @@ async fn transfer_files(
     let mut summary = TransferSummary::default();
     for entry in &manifest.files {
         opts.cancel.check()?;
+            // 文本条目：不落盘，收完交给界面/终端。
+            // 它和文件走同一套 OFFER/ACK/DATA/RESULT，只是没有 .part、没有续传状态。
+            // 必须放在路径处理**之前**：文本的"名字"是给人看的说明（可能带斜杠等
+            // 路径里不允许的字符），不该拿它去做路径校验。
+            if entry.kind == ItemKind::Text {
+                match receive_text_item(
+                    &conn,
+                    &mut send,
+                    &mut recv,
+                    entry,
+                    max_chunk_size,
+                    progress,
+                    &opts.cancel,
+                )
+                .await
+                {
+                    Ok(text) => {
+                        summary.bytes_sent += entry.size;
+                        progress.send(ProgressEvent::TextReceived {
+                            label: entry.relative_path.clone(),
+                            text: text.clone(),
+                        });
+                        summary.texts.push((entry.relative_path.clone(), text));
+                        let _ = write_frame(
+                            &mut send,
+                            &Frame::json(
+                                KIND_RESULT,
+                                &TransferResult {
+                                    file_id: entry.file_id.clone(),
+                                    ok: true,
+                                    error: None,
+                                },
+                            )?,
+                        )
+                        .await;
+                        drain_result(&mut recv, &entry.file_id).await?;
+                        continue;
+                    }
+                    Err(e) => {
+                        if matches!(e, Error::Cancelled) {
+                            return Err(e);
+                        }
+                        // 和文件同样的策略：传一半失败必须结束整次会话，避免单流失步
+                        let msg = e.to_string();
+                        progress.send(ProgressEvent::Warn(format!(
+                            "{} 没能收到：{msg}",
+                            entry.relative_path
+                        )));
+                        summary.failures.push((entry.relative_path.clone(), msg.clone()));
+                        let _ = write_frame(
+                            &mut send,
+                            &Frame::json(
+                                KIND_RESULT,
+                                &TransferResult {
+                                    file_id: entry.file_id.clone(),
+                                    ok: false,
+                                    error: Some(msg),
+                                },
+                            )?,
+                        )
+                        .await;
+                        return Err(e);
+                    }
+                }
+            }
+
         let rel = fs_util::safe_relative_path(&entry.relative_path)?;
         let target = fs_util::join_checked(&opts.dest_dir, &rel);
         let part = fs_util::part_path(&target);
@@ -990,6 +1082,7 @@ async fn transfer_files(
 
     progress.send(ProgressEvent::SessionFinished {
         files: summary.files_sent,
+        texts: summary.texts.len(),
         bytes: summary.bytes_sent,
     });
 
@@ -1057,6 +1150,108 @@ async fn prepare_target(part: &Path, total_size: u64, start_offset: u64) -> Resu
     .await
     .map_err(|e| Error::protocol(format!("预分配任务失败：{e}")))??;
     Ok(())
+}
+
+/// 接收一段文本：走同一套 OFFER/ACK/DATA/FILE_END 流程，但**不落盘**。
+///
+/// 为什么复用文件那一套而不是另开"文本通道"：文本条目在协议上就是一个小文件，
+/// 复用意味着校验（BLAKE3）、分块、进度、结果确认只有一份实现。
+/// 区别只有：没有 `.part`、没有续传状态、内容进内存后交给界面。
+async fn receive_text_item(
+    conn: &quinn::Connection,
+    send: &mut quinn::SendStream,
+    recv: &mut quinn::RecvStream,
+    entry: &FileEntry,
+    chunk_size: u32,
+    progress: &ProgressSender,
+    cancel: &CancelToken,
+) -> Result<String> {
+    let offer = FileOffer {
+        file_id: entry.file_id.clone(),
+        relative_path: entry.relative_path.clone(),
+        size: entry.size,
+        blake3: entry.blake3.clone(),
+        // 文本不续传：它本来就小，"半个文本"对用户也没有意义
+        have_bytes: 0,
+        chunk_size,
+    };
+    write_frame(send, &Frame::json(KIND_OFFER, &offer)?).await?;
+
+    let frame = read_frame(recv)
+        .await?
+        .ok_or_else(|| Error::protocol("主机在文本协商阶段断开"))?;
+    frame.expect_kind(KIND_ACK, "续传确认")?;
+    let _ack: OfferAck = frame.decode_json()?;
+
+    progress.send(ProgressEvent::FileStarted {
+        file_id: entry.file_id.clone(),
+        relative_path: entry.relative_path.clone(),
+        size: entry.size,
+        resumed_from: 0,
+    });
+
+    // 上限比发送端宽松，但必须有：对端要是坏了，我们不能无限吃内存
+    let cap = crate::transfer::plan::MAX_TEXT_BYTES as u64 + 4096;
+    let mut out: Vec<u8> = Vec::with_capacity(entry.size as usize);
+    let mut hasher = blake3::Hasher::new();
+
+    loop {
+        cancel.check()?;
+        let Some(frame) = read_frame_watchdog(conn, recv).await? else {
+            return Err(Error::Disconnected {
+                received: out.len() as u64,
+                total: entry.size,
+            });
+        };
+        match frame.kind {
+            KIND_DATA => {
+                if out.len() as u64 + frame.payload.len() as u64 > cap {
+                    return Err(Error::protocol("对端发来的文本超过大小上限，已中止"));
+                }
+                hasher.update(&frame.payload);
+                out.extend_from_slice(&frame.payload);
+                progress.send(ProgressEvent::ChunkProgress {
+                    file_id: entry.file_id.clone(),
+                    bytes_done: out.len() as u64,
+                    bytes_total: entry.size,
+                });
+            }
+            KIND_FILE_END => {
+                let end: FileEnd = frame.decode_json()?;
+                if !end.blake3.eq_ignore_ascii_case(&entry.blake3) {
+                    return Err(Error::protocol(format!(
+                        "{} 的校验基准不一致，拒绝接收（请让主机重新分享）",
+                        entry.relative_path
+                    )));
+                }
+                break;
+            }
+            KIND_ERROR => {
+                let e: ErrorMsg = frame.decode_json()?;
+                return Err(Error::protocol(format!("主机报告错误：{}", e.message)));
+            }
+            other => {
+                return Err(Error::protocol(format!(
+                    "接收文本时收到意外的帧类型 {other}"
+                )));
+            }
+        }
+    }
+
+    if out.len() as u64 != entry.size {
+        return Err(Error::Disconnected {
+            received: out.len() as u64,
+            total: entry.size,
+        });
+    }
+    let actual = hex::encode(hasher.finalize().as_bytes());
+    if !actual.eq_ignore_ascii_case(&entry.blake3) {
+        return Err(Error::ChecksumMismatch {
+            path: PathBuf::from(&entry.relative_path),
+        });
+    }
+    String::from_utf8(out)
+        .map_err(|_| Error::protocol("对端发来的内容不是有效文本（UTF-8 解码失败）"))
 }
 
 /// 接收单个文件：协商好的偏移开始，流式写 `.part`，每块之后写检查点。
@@ -1364,10 +1559,21 @@ async fn drain_result(recv: &mut quinn::RecvStream, file_id: &str) -> Result<()>
 }
 
 /// 供发送端在会话前"预热"计划（扫描 + 哈希），CLI 用它显示总大小。
+/// 一句话概括清单里有什么。文件和文本分开数——"1 个文件"和"1 段文本"对用户
+/// 是两件很不一样的事，混着说会让人以为收到了个文件。
 pub fn summarize_plan(plan: &TransferPlan) -> String {
-    let files = plan.files.len();
+    let files = plan
+        .files
+        .iter()
+        .filter(|f| f.kind == ItemKind::File)
+        .count();
+    let texts = plan.files.len() - files;
     let bytes = plan.total_bytes;
-    format!("{files} 个文件，共 {}", human_bytes(bytes))
+    match (files, texts) {
+        (0, t) => format!("{t} 段文本，共 {}", human_bytes(bytes)),
+        (f, 0) => format!("{f} 个文件，共 {}", human_bytes(bytes)),
+        (f, t) => format!("{f} 个文件 + {t} 段文本，共 {}", human_bytes(bytes)),
+    }
 }
 
 pub fn human_bytes(n: u64) -> String {
