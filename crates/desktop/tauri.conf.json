@@ -23,8 +23,18 @@
     }
   },
   "bundle": {
-    "active": false,
-    "targets": "all",
-    "icon": ["icons/icon.ico"]
+    "active": true,
+    "targets": ["nsis"],
+    "publisher": "Chuanmen",
+    "category": "Utility",
+    "shortDescription": "局域网内扫码即传，双向往房间里放东西",
+    "longDescription": "Chuanmen 让同一个局域网里的设备互相传文件和文字：主机出二维码，对方扫码即连；文件走局域网直连，不上传云端、不留痕。",
+    "icon": ["icons/icon.ico"],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["SimpChinese"]
+      }
+    }
   }
 }

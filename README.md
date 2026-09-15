@@ -92,6 +92,23 @@ cargo run -p chuanmen-desktop
 > 所以日常的 `cargo build` / `cargo test` **不会**构建 Tauri（它的编译产物有 1–3 GB）。
 > 只有显式 `-p chuanmen-desktop` 时才会。
 
+**做一个安装包（Windows）**：
+
+```bash
+cd crates/desktop
+npx @tauri-apps/cli build          # 产出 target/release/bundle/nsis/Chuanmen_<版本>_x64-setup.exe
+```
+
+装出来的是**按用户安装**（`%LOCALAPPDATA%\Chuanmen`，不需要管理员权限），
+带开始菜单快捷方式，控制面板可卸载。安装包约 2.5 MB（WebView2 用系统的；
+Windows 10/11 一般都自带）。
+
+> **没签名**。我们手上没有代码签名证书，所以 Windows SmartScreen 大概率会拦一下
+> （"更多信息 → 仍要运行"）。要签名就买一张 OV/EV 证书，然后：
+> `signtool sign /sha1 <证书指纹> Chuanmen_0.1.0_x64-setup.exe`，
+> 或者把证书指纹写进 `tauri.conf.json` 的 `bundle.windows.certificateThumbprint`
+> 让 Tauri 在打包时自动签。签名解决的是"下载的人敢不敢点"，不影响功能。
+
 
 ---
 
