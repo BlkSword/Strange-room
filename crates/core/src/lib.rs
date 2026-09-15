@@ -27,6 +27,7 @@ pub mod progress;
 pub mod protocol;
 pub mod qr;
 pub mod transfer;
+pub mod trust;
 
 pub use bootstrap::BootstrapServer;
 pub use cancel::CancelToken;

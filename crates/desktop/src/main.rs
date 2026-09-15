@@ -349,6 +349,10 @@ struct NearbyDevice {
     name: String,
     /// 与主机屏幕一致的 6 位验证码
     code: String,
+    /// 这台设备以前连过（指纹一致）
+    known: bool,
+    /// 这个名字以前对应另一台设备（指纹不同）——要提醒用户
+    name_changed: bool,
     /// 形如 `192.168.1.9:51234`，让人知道连的是哪个地址
     address: String,
     payload: String,
@@ -379,6 +383,8 @@ async fn discover_hosts(
     let hosts = chuanmen_core::discover(timeout, own_sid.as_deref(), &cancel)
         .await
         .map_err(|e| e.to_string())?;
+    // 设备簿只影响"要不要再对码"的提示，指纹校验一次都不会少
+    let book = chuanmen_core::trust::DeviceBook::load();
 
     Ok(hosts
         .into_iter()
@@ -386,6 +392,10 @@ async fn discover_hosts(
             // 生成不出连接串的设备直接跳过：点进去也只会得到一个看不懂的错误
             let payload = host.payload().encode().ok()?;
             Some(NearbyDevice {
+                known: book.is_known(&host.fingerprint),
+                name_changed: book
+                    .name_taken_by_other(&host.device_name, &host.fingerprint)
+                    .is_some(),
                 name: host.device_name.clone(),
                 code: host.code.clone(),
                 address: host
@@ -411,6 +421,9 @@ async fn start_receive(
 ) -> Result<(), String> {
     let payload = chuanmen_core::QrPayload::decode(&payload).map_err(|e| e.to_string())?;
     let dest_dir = PathBuf::from(dest);
+    // 记住对方是谁：连之前先取出来（payload 随后会被 move 进 ReceiverOptions）
+    let host_name = payload.name.clone();
+    let host_fp = payload.fp.clone();
 
     // 我也要往房间里放东西（可选）：和 CLI 的 --send / --text 一一对应。
     // 注意：主机没开接收目录时会立刻被拒绝（内核会报"对方这次只往外分享"），
@@ -460,13 +473,21 @@ async fn start_receive(
         .await;
 
         let ui = match result {
-            Ok(s) => UiEvent::Done {
-                files: s.files_sent,
-                texts: s.text_count(),
-                bytes: s.bytes_sent,
-                human_bytes: human_bytes(s.bytes_sent),
-                failures: s.failures.len(),
-            },
+            Ok(s) => {
+                // 连上了就记一笔（只记在本机）：下次搜索时显示"上次连过"
+                let mut book = chuanmen_core::trust::DeviceBook::load();
+                book.remember(&host_fp, &host_name);
+                if let Err(e) = book.save() {
+                    eprintln!("[桌面] 设备簿没能保存：{e}（不影响传文件）");
+                }
+                UiEvent::Done {
+                    files: s.files_sent,
+                    texts: s.text_count(),
+                    bytes: s.bytes_sent,
+                    human_bytes: human_bytes(s.bytes_sent),
+                    failures: s.failures.len(),
+                }
+            }
             Err(e) => UiEvent::Failed {
                 message: e.to_string(),
             },

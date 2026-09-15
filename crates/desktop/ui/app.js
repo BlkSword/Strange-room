@@ -225,12 +225,23 @@ async function scanNearby() {
         "也可以让对方把连接串发给你，粘到下面那一栏。";
       return;
     }
-    hint.textContent =
-      "点设备即可接收。验证码应当和对方屏幕上显示的一致；对不上就别连。";
+    // 设备簿只影响提示：指纹每次连接都照验，所以"上次连过"意味着
+    // 不用再对一次验证码，而不是"闭着眼睛连"
+    const anyKnown = devices.some((d) => d.known);
+    const anyChanged = devices.some((d) => d.nameChanged);
+    hint.textContent = anyChanged
+      ? "⚠ 有一台设备的指纹和以前不一样（对方可能重装过，也可能不对劲）。看清楚了再连。"
+      : anyKnown
+      ? "带「上次连过」的直接连即可——指纹照旧每次验，只是不用再对验证码。"
+      : "点设备即可接收。验证码应当和对方屏幕上显示的一致；对不上就别连。";
     devices.forEach((d) => {
       const li = document.createElement("li");
       const label = document.createElement("span");
-      label.textContent = `${d.name} · 验证码 ${d.code} · ${d.address}`;
+      const marks = [];
+      if (d.known) marks.push("上次连过");
+      if (d.nameChanged) marks.push("⚠ 名字相同、指纹不同");
+      const tail = marks.length ? ` · ${marks.join(" · ")}` : "";
+      label.textContent = `${d.name} · 验证码 ${d.code} · ${d.address}${tail}`;
       const b = document.createElement("button");
       b.textContent = "接收";
       b.onclick = () => {

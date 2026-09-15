@@ -19,6 +19,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use chuanmen_core::net::quic::{HostOptions, HostSession, Receiver, ReceiverOptions};
+use chuanmen_core::trust::DeviceBook;
 use chuanmen_core::progress::ProgressSender;
 
 use render::ProgressRenderer;
@@ -108,6 +109,13 @@ enum Command {
         timeout: u64,
     },
 
+    /// 看看记住过哪些设备（只记在本机；指纹每次连接仍然照验）
+    Devices {
+        /// 忘掉一台设备：给指纹前几位即可
+        #[arg(long)]
+        forget: Option<String>,
+    },
+
     /// 网络自检：连不上时用它判断问题出在哪（只发握手，不传输任何文件）
     Diagnose {
         /// 二维码里的连接串（cm1: 开头），由主机提供
@@ -175,6 +183,7 @@ async fn run(cli: Cli) -> Result<()> {
             tcp,
         } => receive(payload, to, name, no_resume, send_paths, text, tcp).await,
         Command::Discover { timeout } => discover(timeout).await,
+        Command::Devices { forget } => devices(forget),
         Command::Diagnose { payload } => diagnose(payload).await,
     }
 }
@@ -387,13 +396,92 @@ async fn discover(timeout_secs: u64) -> Result<()> {
         anyhow::bail!("没有发现任何设备");
     }
 
+    let book = DeviceBook::load();
     println!("找到 {} 台：", hosts.len());
+    let mut any_known = false;
     for host in &hosts {
-        println!("  {}", host.display_line());
+        let mut line = host.display_line();
+        if book.is_known(&host.fingerprint) {
+            any_known = true;
+            line.push_str(" · 上次连过");
+        }
+        if book
+            .name_taken_by_other(&host.device_name, &host.fingerprint)
+            .is_some()
+        {
+            line.push_str(" · ⚠ 名字相同、指纹不同");
+        }
+        println!("  {line}");
     }
     println!();
+    if any_known {
+        println!("带「上次连过」的是你以前连过的设备。指纹还是每次都验，所以连错人不可能；");
+        println!("只是你不需要再对一次验证码。");
+    }
     println!("提示：验证码应当和对方屏幕上显示的一致；对不上就不要连。");
     Ok(())
+}
+
+/// 看看/清理本机的设备簿。
+///
+/// 只读本机文件、不联网：设备簿是"最近的人"这一层最简形态。
+fn devices(forget: Option<String>) -> Result<()> {
+    let mut book = DeviceBook::load();
+
+    if let Some(prefix) = forget {
+        let prefix = prefix.trim().to_ascii_lowercase();
+        if prefix.is_empty() {
+            anyhow::bail!("请给指纹前几位，例如 --forget 3f9a");
+        }
+        let hits: Vec<(String, String)> = book
+            .devices
+            .iter()
+            .filter(|d| d.fingerprint.to_ascii_lowercase().starts_with(&prefix))
+            .map(|d| (d.fingerprint.clone(), d.name.clone()))
+            .collect();
+        match hits.len() {
+            0 => anyhow::bail!("没有指纹以 {prefix} 开头的设备"),
+            1 => {
+                let (fp, name) = hits.into_iter().next().expect("长度已判断");
+                book.forget(&fp);
+                book.save()?;
+                println!("已忘掉：{name}（{fp}）");
+                Ok(())
+            }
+            n => {
+                println!("有 {n} 台设备的指纹都以 {prefix} 开头，请多给几位：");
+                for (fp, name) in hits {
+                    println!("  {name} · {fp}");
+                }
+                anyhow::bail!("指纹前缀不唯一");
+            }
+        }
+    } else {
+        if book.devices.is_empty() {
+            println!("设备簿是空的。");
+            println!("成功连过一台设备之后，它会被记在这里（只记在本机：指纹 + 名字 + 时间）。");
+            println!("连的时候指纹照样每次都验；设备簿只是让你不用再对一次验证码。");
+            return Ok(());
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        println!("记住的设备（最近连过的排前面）：");
+        for d in book.recent() {
+            let short: String = d.fingerprint.chars().take(16).collect();
+            println!(
+                "  {} · {} · 连过 {} 次 · 上次 {}",
+                d.name,
+                short,
+                d.connects,
+                chuanmen_core::trust::human_age(d.last_seen_ms, now)
+            );
+        }
+        println!();
+        println!("忘掉一台：chuan devices --forget <指纹前几位>");
+        Ok(())
+    }
 }
 
 /// 扫描附近设备并让用户挑一台（用于 `chuan receive` 不带连接串的情况）。
@@ -419,15 +507,30 @@ async fn pick_nearby_host() -> Result<chuanmen_core::NearbyHost> {
         anyhow::bail!("没有找到正在分享的设备");
     }
 
+    let book = DeviceBook::load();
+    let label = |host: &chuanmen_core::NearbyHost| {
+        let mut line = host.display_line();
+        if book.is_known(&host.fingerprint) {
+            line.push_str(" · 上次连过");
+        }
+        if book
+            .name_taken_by_other(&host.device_name, &host.fingerprint)
+            .is_some()
+        {
+            line.push_str(" · ⚠ 名字相同、指纹不同");
+        }
+        line
+    };
+
     if hosts.len() == 1 {
         let host = hosts.into_iter().next().expect("已经判断过长度为 1");
-        println!("找到一台：{}", host.display_line());
+        println!("找到一台：{}", label(&host));
         return Ok(host);
     }
 
     println!("找到 {} 台设备：", hosts.len());
     for (i, host) in hosts.iter().enumerate() {
-        println!("  {}) {}", i + 1, host.display_line());
+        println!("  {}) {}", i + 1, label(host));
     }
     print!("\n输入要连接的序号（直接回车取消）：");
     io::stdout().flush().ok();
@@ -467,6 +570,22 @@ async fn receive(
 
     let payload = chuanmen_core::QrPayload::decode(&payload)
         .context("解析连接串失败")?;
+
+    // 设备簿：认人只影响提示与记账，**指纹校验一次都不会少**
+    let book = DeviceBook::load();
+    if book.is_known(&payload.fp) {
+        println!(
+            "（{} 你以前连过，验证码不用再对——指纹照旧每次都验）",
+            payload.name
+        );
+    } else if let Some(other) = book.name_taken_by_other(&payload.name, &payload.fp) {
+        let short: String = other.fingerprint.chars().take(16).collect();
+        println!(
+            "⚠ 注意：\"{}\" 这个名字以前对应另一台设备（指纹 {}…）。",
+            payload.name, short
+        );
+        println!("   如果对方没重装过客户端、也没换设备，就别继续。");
+    }
 
     let dest = std::path::absolute(&to).unwrap_or(to);
     println!("目标目录：{}", dest.display());
@@ -512,6 +631,9 @@ async fn receive(
         });
     }
 
+    let host_name = payload.name.clone();
+    let host_fp = payload.fp.clone();
+
     let result = Receiver::run(
         ReceiverOptions {
             payload,
@@ -538,6 +660,14 @@ async fn receive(
             let put_items = s.files_sent.saturating_sub(s.received_files);
             let sent_bytes = s.bytes_sent.saturating_sub(s.received_bytes);
 
+            // 连上了就记一笔：下次再连它，提示你"上次连过"、不用再对码
+            {
+                let mut book = DeviceBook::load();
+                book.remember(&host_fp, &host_name);
+                if let Err(e) = book.save() {
+                    eprintln!("（设备簿没能保存：{e}。不影响传文件）");
+                }
+            }
             if s.received_files > 0 || !s.texts.is_empty() {
                 println!(
                     "\n接收完成：收到 {} 个文件 + {} 段文本，共 {}",
